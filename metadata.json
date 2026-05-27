@@ -1,0 +1,8 @@
+{
+  "name": "Remix: §LG13§ F15.5",
+  "description": "Forenzní auditní engine F15.5 s hierarchickým řazením a atomární analýzou.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
