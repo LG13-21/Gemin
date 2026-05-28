@@ -18,6 +18,8 @@
         "content": { "type": "string" },
         "insight": { "type": "string" },
         "indexStatus": { "type": "string", "enum": ["IDLE", "INDEXING", "DONE", "ERROR"] },
+        "driveFolderId": { "type": "string" },
+        "driveFileId": { "type": "string" },
         "userId": { "type": "string" }
       },
       "required": ["id", "name", "timestamp", "userId"]

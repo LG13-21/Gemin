@@ -1,8 +1,10 @@
 {
-  "apiKey": "AIzaSyA4gegEe_HXaig6I5SgQOeRME8y3yoHaV4",
-  "authDomain": "excellent-booking-rv7sv.firebaseapp.com",
-  "projectId": "excellent-booking-rv7sv",
-  "storageBucket": "excellent-booking-rv7sv.firebasestorage.app",
-  "messagingSenderId": "531754738410",
-  "appId": "1:531754738410:web:bd5bd32084be7a01ab6d93"
+  "projectId": "gen-lang-client-0566942307",
+  "appId": "1:486288888723:web:7760dfe47250ddb2ccce66",
+  "apiKey": "AIzaSyAK_B217o9LOEqVfddYE_q4H8Cuq48y1ls",
+  "authDomain": "gen-lang-client-0566942307.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-4a98c98f-afb7-4914-b532-6c0915343eca",
+  "storageBucket": "gen-lang-client-0566942307.firebasestorage.app",
+  "messagingSenderId": "486288888723",
+  "measurementId": ""
 }

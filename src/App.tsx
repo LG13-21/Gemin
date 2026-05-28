@@ -5,7 +5,7 @@ import {
   Sparkles, Copy, Check, Upload, X, FileJson, Archive, Download, Eye, 
   FileDown, Trash2, FolderArchive, RotateCcw, ListFilter, History,
   LayoutGrid, Layers, ShieldCheck, Gauge, Scissors, Diff, Paperclip, Plus,
-  LogOut, LogIn, Database, Cloud, FolderOpen, Link2
+  LogOut, LogIn, Database, Cloud, FolderOpen, Link2, TrendingUp
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import JSZip from 'jszip';
@@ -15,6 +15,8 @@ import {
   CartesianGrid, Legend, BarChart, Bar, AreaChart, Area 
 } from 'recharts';
 import { reviewCourtRequest } from './services/gemini';
+import { AnalyticsDashboard } from './components/AnalyticsDashboard';
+import { PreShipControlView } from './components/PreShipControlView';
 import { 
   getOrCreateJurisTaskList, fetchJurisTasks, createJurisTask, 
   completeJurisTask, deleteJurisTask, GoogleTask 
@@ -89,6 +91,8 @@ interface FileEntry {
   content?: string; 
   insight?: string; // Pre-analysis result
   indexStatus?: 'IDLE' | 'INDEXING' | 'DONE' | 'ERROR';
+  driveFolderId?: string;
+  driveFileId?: string;
 }
 
 interface CaseRecord {
@@ -108,6 +112,8 @@ interface AuditTask {
   result?: string;
   isNotified?: boolean;
   version?: string;
+  title?: string;
+  caseId?: string;
 }
 
 interface VersionRecord {
@@ -141,7 +147,7 @@ export default function App() {
   const [activeQueueId, setActiveQueueId] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [queueStrategy, setQueueStrategy] = useState<'COMBINE' | 'PER_FILE' | 'CROSS'>('COMBINE');
-  const [appMode, setAppMode] = useState<'AUDIT' | 'COMPOSE' | 'VERTICAL' | 'SYNTHESIS'>('AUDIT');
+  const [appMode, setAppMode] = useState<'AUDIT' | 'COMPOSE' | 'VERTICAL' | 'SYNTHESIS' | 'DASHBOARD' | 'PRE_SHIP'>('AUDIT');
   const [isAutoIndexingEnabled, setIsAutoIndexingEnabled] = useState<boolean>(true);
   const [activeAutoImports, setActiveAutoImports] = useState<{id: string, name: string, status: string}[]>([]);
   const [uploadBatchId, setUploadBatchId] = useState<string | null>(null);
@@ -158,6 +164,7 @@ export default function App() {
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [isCloudSyncing, setIsCloudSyncing] = useState(false);
   const [isFirebaseOffline, setIsFirebaseOffline] = useState(false);
+  const [isFirebaseQuotaExceeded, setIsFirebaseQuotaExceeded] = useState(false);
   const [fixAnalysisText, setFixAnalysisText] = useState<string | null>(null);
   const [isGeneratingFixAnalysis, setIsGeneratingFixAnalysis] = useState(false);
   const [isGeneratingUpgrade, setIsGeneratingUpgrade] = useState(false);
@@ -176,6 +183,12 @@ export default function App() {
   const [isImportingFolder, setIsImportingFolder] = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [isSavingAnalysisToDrive, setIsSavingAnalysisToDrive] = useState(false);
+
+  // High-priority and background imports for Google Drive
+  const [driveFoldersToImportPrompt, setDriveFoldersToImportPrompt] = useState<{ id: string; name: string; selected: boolean }[] | null>(null);
+  const [backgroundImportQueue, setBackgroundImportQueue] = useState<{ id: string; name: string }[]>([]);
+  const [priorityImportIds, setPriorityImportIds] = useState<Set<string>>(new Set());
+  const [backgroundImportStarted, setBackgroundImportStarted] = useState<boolean>(false);
 
   // Google Tasks Integration States
   const [googleTasksListId, setGoogleTasksListId] = useState<string | null>(null);
@@ -302,6 +315,17 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
   };
 
   const registerTaskFromGoogleToQueue = (task: GoogleTask) => {
+    // DUPES CHECK: check if a task with the same title already exists in states pending or processing
+    const hasDuplicate = auditQueue.some(t => 
+      (t.status === 'pending' || t.status === 'processing') && 
+      (t.title === task.title)
+    );
+
+    if (hasDuplicate) {
+      alert(`Došlo k přeskočení importu. Úkol se stejným názvem "${task.title}" již v auditní frontě existuje (ve stavu pending nebo processing).`);
+      return;
+    }
+
     // Extract version suffix from task title like "AUDIT: F16" or "AUDIT: F18_re"
     let ver = 'EXT';
     const match = task.title.match(/AUDIT:\s*([^\s]+)/i) || task.title.match(/AUDIT\s+([^\s]+)/i);
@@ -327,7 +351,8 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
       pillars: [...selectedPillarIds],
       status: 'pending',
       timestamp: Date.now(),
-      version: ver
+      version: ver,
+      title: task.title
     };
 
     setAuditQueue(prev => [...prev, newTask]);
@@ -414,15 +439,27 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
       // Get existing versions currently in the workspace to avoid dupes
       const existingVersions = new Set(uploadedFiles.map(f => f.version));
 
-      for (const folder of fFolders) {
+      const toImport = fFolders.filter((folder: any) => {
         if (existingVersions.has(folder.name)) {
           console.log(`Verze ${folder.name} již v databázi existuje. Přeskakuji automatický import.`);
-          continue;
+          return false;
         }
-        
-        // Hand off to single folder automatic batch import in background
-        autoImportSingleVersionFolder(folder.id, folder.name, token);
-      }
+        return true;
+      });
+
+      if (toImport.length === 0) return;
+
+      // Reset priority check variables when scanning a new batch
+      setPriorityImportIds(new Set());
+      setBackgroundImportStarted(false);
+
+      // Open a beautiful prompt where user can select priority folders and leave other ones for the background
+      setDriveFoldersToImportPrompt(toImport.map((folder: any) => ({
+        id: folder.id,
+        name: folder.name,
+        selected: true
+      })));
+
     } catch (err) {
       console.error('Chyba při prohledávání složek s verzemi F****:', err);
     }
@@ -445,7 +482,28 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
         const data = await res.json();
         const items = data.files || [];
 
+        // Načtení index cache z Disku pro tuto složku
+        let folderIndexMap: Record<string, string> = {};
+        const metadataItem = items.find((item: any) => item.name === '_index_metadata.json');
+        if (metadataItem) {
+          try {
+            console.log(`Nalezena cache metadata indexace _index_metadata.json v Drive složce ${fId}`);
+            const metaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${metadataItem.id}?alt=media`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            if (metaRes.ok) {
+              const metaText = await metaRes.text();
+              folderIndexMap = JSON.parse(metaText);
+              console.log(`Úspěšně načtena cache indexů s ${Object.keys(folderIndexMap).length} záznamy.`);
+            }
+          } catch (e) {
+            console.error('Chyba při stahování/parsování _index_metadata.json cache:', e);
+          }
+        }
+
         for (const item of items) {
+          if (item.name === '_index_metadata.json') continue; // Preskocit indexacni cache soubor
+
           const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
           if (isFolder) {
             const nextVersionName = currentVersionName || item.name;
@@ -485,6 +543,7 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
                     if (!entry.dir) {
                       const fIdRef = `U-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
                       const fCont = await entry.async('string');
+                      const savedZipItemInsight = folderIndexMap[entry.name] || folderIndexMap[filePath];
                       newFiles.push({
                         id: fIdRef,
                         name: entry.name,
@@ -496,7 +555,10 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
                         version: itemVersion,
                         caseId: currentCaseId,
                         content: fCont,
-                        indexStatus: 'IDLE' // Will cause background indexing to pick it up immediately!
+                        indexStatus: savedZipItemInsight ? 'DONE' : 'IDLE',
+                        insight: savedZipItemInsight || undefined,
+                        driveFolderId: fId,
+                        driveFileId: item.id
                       });
                     }
                   }
@@ -510,6 +572,34 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
                   if (item.mimeType.includes('text') || item.mimeType.includes('json') || item.mimeType.includes('xml') || item.name.endsWith('.txt') || item.name.endsWith('.json') || item.name.endsWith('.md')) {
                     fileContent = await downloadRes.text();
                     fileType = item.name.split('.').pop()?.toUpperCase() || 'TXT';
+                  } else if (item.mimeType.includes('officedocument.wordprocessingml') || item.name.toLowerCase().endsWith('.docx')) {
+                    try {
+                      const docxBuffer = await downloadRes.arrayBuffer();
+                      const zip = await JSZip.loadAsync(docxBuffer);
+                      const docXmlFile = zip.file("word/document.xml");
+                      if (docXmlFile) {
+                        const xmlContent = await docXmlFile.async("text");
+                        const wtRegex = /<w:t[^>]*>([\s\S]*?)<\/w:t>/g;
+                        let match;
+                        const textParts: string[] = [];
+                        while ((match = wtRegex.exec(xmlContent)) !== null) {
+                          textParts.push(match[1]);
+                        }
+                        fileContent = textParts.join(" ")
+                          .replace(/&amp;/g, '&')
+                          .replace(/&lt;/g, '<')
+                          .replace(/&gt;/g, '>')
+                          .replace(/&quot;/g, '"')
+                          .replace(/&apos;/g, "'")
+                          .trim();
+                      } else {
+                        fileContent = `[Prázdný nebo nesprávný DOCX soubor z Google Drive]`;
+                      }
+                    } catch (e: any) {
+                      console.error("Docx zip read error on auto-imported file:", e);
+                      fileContent = `[Chyba při čtení DOCX souboru z Google Drive: ${e?.message || String(e)}]`;
+                    }
+                    fileType = 'DOCX';
                   } else if (item.mimeType.includes('pdf')) {
                     fileContent = `[Stáhnutý binární PDF soubor: ${item.name}. Pro plnou analýzu doporučujeme Google Dokumenty nebo čistě textový formát.]`;
                     fileType = 'PDF';
@@ -521,6 +611,7 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
               }
 
               const newFileId = `U-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+              const savedInsight = folderIndexMap[item.name];
               newFiles.push({
                 id: newFileId,
                 name: item.name,
@@ -532,7 +623,10 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
                 version: itemVersion,
                 caseId: currentCaseId,
                 content: fileContent,
-                indexStatus: 'IDLE' // IDLE ensures background pre-indexing picks it up!
+                indexStatus: savedInsight ? 'DONE' : 'IDLE',
+                insight: savedInsight || undefined,
+                driveFolderId: fId,
+                driveFileId: item.id
               });
             } catch (err) {
               console.error(`Chyba stahování souboru ${item.name} při auto-importu:`, err);
@@ -700,6 +794,34 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
         if (mimeType.includes('text') || mimeType.includes('json') || mimeType.includes('xml') || name.endsWith('.txt') || name.endsWith('.json') || name.endsWith('.md')) {
           fileContent = await res.text();
           fileType = name.split('.').pop()?.toUpperCase() || 'TXT';
+        } else if (mimeType.includes('officedocument.wordprocessingml') || name.toLowerCase().endsWith('.docx')) {
+          try {
+            const docxBuffer = await res.arrayBuffer();
+            const zip = await JSZip.loadAsync(docxBuffer);
+            const docXmlFile = zip.file("word/document.xml");
+            if (docXmlFile) {
+              const xmlContent = await docXmlFile.async("text");
+              const wtRegex = /<w:t[^>]*>([\s\S]*?)<\/w:t>/g;
+              let match;
+              const textParts: string[] = [];
+              while ((match = wtRegex.exec(xmlContent)) !== null) {
+                textParts.push(match[1]);
+              }
+              fileContent = textParts.join(" ")
+                .replace(/&amp;/g, '&')
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .replace(/&quot;/g, '"')
+                .replace(/&apos;/g, "'")
+                .trim();
+            } else {
+              fileContent = `[Prázdný nebo nesprávný DOCX soubor z Google Drive]`;
+            }
+          } catch (e: any) {
+            console.error("Docx zip read error on Drive file:", e);
+            fileContent = `[Chyba při čtení DOCX souboru z Google Drive: ${e?.message || String(e)}]`;
+          }
+          fileType = 'DOCX';
         } else if (mimeType.includes('pdf')) {
           fileContent = `[Stáhnutý binární PDF soubor: ${name}. Pro plnou analýzu doporučujeme Google Dokumenty nebo čistě textový formát.]`;
           fileType = 'PDF';
@@ -823,6 +945,34 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
                   if (item.mimeType.includes('text') || item.mimeType.includes('json') || item.mimeType.includes('xml') || item.name.endsWith('.txt') || item.name.endsWith('.json') || item.name.endsWith('.md')) {
                     fileContent = await downloadRes.text();
                     fileType = item.name.split('.').pop()?.toUpperCase() || 'TXT';
+                  } else if (item.mimeType.includes('officedocument.wordprocessingml') || item.name.toLowerCase().endsWith('.docx')) {
+                    try {
+                      const docxBuffer = await downloadRes.arrayBuffer();
+                      const zip = await JSZip.loadAsync(docxBuffer);
+                      const docXmlFile = zip.file("word/document.xml");
+                      if (docXmlFile) {
+                        const xmlContent = await docXmlFile.async("text");
+                        const wtRegex = /<w:t[^>]*>([\s\S]*?)<\/w:t>/g;
+                        let match;
+                        const textParts: string[] = [];
+                        while ((match = wtRegex.exec(xmlContent)) !== null) {
+                          textParts.push(match[1]);
+                        }
+                        fileContent = textParts.join(" ")
+                          .replace(/&amp;/g, '&')
+                          .replace(/&lt;/g, '<')
+                          .replace(/&gt;/g, '>')
+                          .replace(/&quot;/g, '"')
+                          .replace(/&apos;/g, "'")
+                          .trim();
+                      } else {
+                        fileContent = `[Prázdný nebo nesprávný DOCX soubor z Google Drive]`;
+                      }
+                    } catch (e: any) {
+                      console.error("Docx zip read error on manually-imported file:", e);
+                      fileContent = `[Chyba při čtení DOCX souboru z Google Drive: ${e?.message || String(e)}]`;
+                    }
+                    fileType = 'DOCX';
                   } else if (item.mimeType.includes('pdf')) {
                     fileContent = `[Stáhnutý binární PDF soubor: ${item.name}. Pro plnou analýzu doporučujeme Google Dokumenty nebo čistě textový formát.]`;
                     fileType = 'PDF';
@@ -1055,6 +1205,59 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
     }
   };
 
+  const saveIndexToGoogleDrive = async (file: FileEntry, insight: string) => {
+    if (!driveToken || !file.driveFolderId) return;
+    try {
+      const folderId = file.driveFolderId;
+      const fileName = file.name;
+      
+      const q = encodeURIComponent(`'${folderId}' in parents and name = '_index_metadata.json' and trashed = false`);
+      const searchRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=1`, {
+        headers: { Authorization: `Bearer ${driveToken}` }
+      });
+      
+      if (!searchRes.ok) return;
+      const searchData = await searchRes.json();
+      const files = searchData.files || [];
+      
+      if (files.length > 0) {
+        const indexFileId = files[0].id;
+        
+        const downloadRes = await fetch(`https://www.googleapis.com/drive/v3/files/${indexFileId}?alt=media`, {
+          headers: { Authorization: `Bearer ${driveToken}` }
+        });
+        
+        let currentMap: Record<string, string> = {};
+        if (downloadRes.ok) {
+          try {
+            const text = await downloadRes.text();
+            currentMap = JSON.parse(text);
+          } catch(err) {
+            console.error('Failed to parse existing _index_metadata.json:', err);
+          }
+        }
+        
+        currentMap[fileName] = insight;
+        
+        await fetch(`https://www.googleapis.com/upload/drive/v3/files/${indexFileId}?uploadType=media`, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${driveToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(currentMap)
+        });
+        console.log(`Saved index_metadata.json update to Google Drive folder ${folderId}`);
+      } else {
+        const initialMap = { [fileName]: insight };
+        await uploadFileToDrive('_index_metadata.json', JSON.stringify(initialMap), 'application/json', folderId);
+        console.log(`Created index_metadata.json on Google Drive folder ${folderId}`);
+      }
+    } catch (err) {
+      console.error('Error in saveIndexToGoogleDrive:', err);
+    }
+  };
+
   const uploadAnalysisToDriveForVersion = async (versionName: string, content: string) => {
     if (!driveToken) {
       alert('Nejprve se prosím přihlaste vpravo nahoře pro přístup k Disku Google.');
@@ -1143,10 +1346,64 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
         const casesSnap = await getDocs(collection(db, `users/${uid}/cases`));
         const settingsSnap = await getDoc(doc(db, `users/${uid}/settings`, 'current'));
 
-        if (!filesSnap.empty) setUploadedFiles(filesSnap.docs.map(d => d.data() as FileEntry));
-        if (!queueSnap.empty) setAuditQueue(queueSnap.docs.map(d => d.data() as AuditTask));
-        if (!historySnap.empty) setHistory(historySnap.docs.map(d => d.data() as VersionRecord));
-        if (!casesSnap.empty) setCases(casesSnap.docs.map(d => d.data() as CaseRecord));
+        if (!filesSnap.empty) {
+          const cloudFiles = filesSnap.docs.map(d => d.data() as FileEntry);
+          setUploadedFiles(prev => {
+            const merged = [...cloudFiles];
+            prev.forEach(localFile => {
+              const cloudIndex = merged.findIndex(f => f.id === localFile.id);
+              if (cloudIndex === -1) {
+                merged.push(localFile);
+              } else if ((localFile.timestamp || 0) > (merged[cloudIndex].timestamp || 0)) {
+                merged[cloudIndex] = localFile;
+              }
+            });
+            return merged;
+          });
+        }
+        if (!queueSnap.empty) {
+          const cloudQueue = queueSnap.docs.map(d => d.data() as AuditTask);
+          setAuditQueue(prev => {
+            const merged = [...cloudQueue];
+            prev.forEach(localTask => {
+              const cloudIndex = merged.findIndex(t => t.id === localTask.id);
+              if (cloudIndex === -1) {
+                merged.push(localTask);
+              } else if ((localTask.timestamp || 0) > (merged[cloudIndex].timestamp || 0)) {
+                merged[cloudIndex] = localTask;
+              }
+            });
+            return merged;
+          });
+        }
+        if (!historySnap.empty) {
+          const cloudHistory = historySnap.docs.map(d => d.data() as VersionRecord);
+          setHistory(prev => {
+            const merged = [...cloudHistory];
+            prev.forEach(localHistory => {
+              const cloudIndex = merged.findIndex(h => h.id === localHistory.id);
+              if (cloudIndex === -1) {
+                merged.push(localHistory);
+              } else if ((localHistory.timestamp || 0) > (merged[cloudIndex].timestamp || 0)) {
+                merged[cloudIndex] = localHistory;
+              }
+            });
+            return merged;
+          });
+        }
+        if (!casesSnap.empty) {
+          const cloudCases = casesSnap.docs.map(d => d.data() as CaseRecord);
+          setCases(prev => {
+            const merged = [...cloudCases];
+            prev.forEach(localCase => {
+              const cloudIndex = merged.findIndex(c => c.id === localCase.id);
+              if (cloudIndex === -1) {
+                merged.push(localCase);
+              }
+            });
+            return merged;
+          });
+        }
         
         if (settingsSnap.exists()) {
           const s = settingsSnap.data();
@@ -1160,6 +1417,9 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
         if (err && (err.message?.includes('offline') || err.message?.includes('Failed to get document because the client is offline') || err.code === 'unavailable')) {
           setIsFirebaseOffline(true);
         }
+        if (err && (err.message?.includes('Quota limit exceeded') || err.message?.includes('quota') || err.code === 'resource-exhausted')) {
+          setIsFirebaseQuotaExceeded(true);
+        }
         handleFirestoreError(err, OperationType.GET, 'initial_load');
       }
     };
@@ -1169,47 +1429,61 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
 
   const syncToCloud = async (key: string, data: any) => {
     if (!user || !isLoaded.current || isResetting.current) return;
+    if (isFirebaseQuotaExceeded) {
+      console.warn(`Cloud synchronization for ${key} is paused due to exceeded Firestore Free Tier Quota limits.`);
+      return;
+    }
     setIsCloudSyncing(true);
     const uid = user.uid;
     
+    // Safely strips any undefined fields and assigns userId
+    const cleanEntity = (item: any) => {
+      const cleaned = JSON.parse(JSON.stringify(item));
+      cleaned.userId = uid;
+      return cleaned;
+    };
+
     try {
       if (key === 'juris_files') {
         const batch = writeBatch(db);
         data.forEach((f: FileEntry) => {
-          batch.set(doc(db, `users/${uid}/files`, f.id), { ...f, userId: uid });
+          batch.set(doc(db, `users/${uid}/files`, f.id), cleanEntity(f));
         });
         await batch.commit();
       } else if (key === 'juris_queue') {
         const batch = writeBatch(db);
         data.forEach((t: AuditTask) => {
-          batch.set(doc(db, `users/${uid}/queue`, t.id), { ...t, userId: uid });
+          batch.set(doc(db, `users/${uid}/queue`, t.id), cleanEntity(t));
         });
         await batch.commit();
       } else if (key === 'juris_history') {
         const batch = writeBatch(db);
         data.forEach((h: VersionRecord) => {
-          batch.set(doc(db, `users/${uid}/history`, h.id), { ...h, userId: uid });
+          batch.set(doc(db, `users/${uid}/history`, h.id), cleanEntity(h));
         });
         await batch.commit();
       } else if (key === 'juris_cases') {
         const batch = writeBatch(db);
         data.forEach((c: CaseRecord) => {
-          batch.set(doc(db, `users/${uid}/cases`, c.id), { ...c, userId: uid });
+          batch.set(doc(db, `users/${uid}/cases`, c.id), cleanEntity(c));
         });
         await batch.commit();
       } else {
-        await setDoc(doc(db, `users/${uid}/settings`, 'current'), {
+        await setDoc(doc(db, `users/${uid}/settings`, 'current'), cleanEntity({
           currentCaseId,
           currentVersion,
           queueStrategy,
           gitContext,
-          userId: uid
-        });
+        }));
       }
       setIsFirebaseOffline(false);
+      setIsFirebaseQuotaExceeded(false);
     } catch (err: any) {
       if (err && (err.message?.includes('offline') || err.message?.includes('Failed to get document because the client is offline') || err.code === 'unavailable')) {
         setIsFirebaseOffline(true);
+      }
+      if (err && (err.message?.includes('Quota limit exceeded') || err.message?.includes('quota') || err.code === 'resource-exhausted' || err.message?.includes('exhausted'))) {
+        setIsFirebaseQuotaExceeded(true);
       }
       handleFirestoreError(err, OperationType.WRITE, key);
     } finally {
@@ -1517,6 +1791,9 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
         const isBinaryPlaceholder = 
           idleFile.content?.startsWith('[Stáhnutý binární') || 
           idleFile.content?.startsWith('[Nahraný binární') || 
+          idleFile.content?.startsWith('[Chyba parsování') || 
+          idleFile.content?.startsWith('[Prázdný') ||
+          !idleFile.content ||
           ['PDF', 'ZIP', 'BIN', 'PNG', 'JPG', 'JPEG', 'GIF'].includes(idleFile.type || '');
 
         if (isBinaryPlaceholder) {
@@ -1536,10 +1813,19 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
           const prompt = `Získej stručný vhled (2 věty) pro dokument: ${idleFile.name}. Zaměř se na právní podstatu.`;
           
           const result = await reviewCourtRequest(prompt, [`FILE: ${idleFile.name}\nCONTENT:\n${idleFile.content?.substring(0, 10000)}`], ['INDEXACE'], [], '', 'AUDIT');
+          const finalInsight = result || '';
+          setUploadedFiles(prev => prev.map(f => f.id === idleFile.id ? { ...f, indexStatus: 'DONE', insight: finalInsight } : f));
           
-          setUploadedFiles(prev => prev.map(f => f.id === idleFile.id ? { ...f, indexStatus: 'DONE', insight: result || '' } : f));
-        } catch (e) {
+          if (driveToken && idleFile.driveFolderId) {
+            saveIndexToGoogleDrive(idleFile, finalInsight);
+          }
+        } catch (e: any) {
           console.error('Indexing failed for:', idleFile.name, e);
+          const isQuota = e.message?.includes('429') || e.message?.includes('QUOTA') || e.message?.includes('Quota') || e.message?.includes('RESOURCE_EXHAUSTED');
+          if (isQuota) {
+            setIsAutoIndexingEnabled(false);
+            setError("⚠️ PRE-INDEXACE POZASTAVENA (Quota 429): Dosáhli jste limitu bezplatných požadavků pro Gemini API. Auto-indexace na pozadí byla vypnuta. Až vyprší časový limit (30-60 s), můžete ji opět manuálně zapnout kliknutím na tlačítko AKTIVNÍ / POZASTAVENÁ ve správě souborů.");
+          }
           setUploadedFiles(prev => prev.map(f => f.id === idleFile.id ? { ...f, indexStatus: 'ERROR' } : f));
           // Wait longer on error before next attempt
           await new Promise(resolve => setTimeout(resolve, 5000));
@@ -1550,6 +1836,31 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
       processFile();
     }
   }, [uploadedFiles, isReviewing, isAutoIndexingEnabled]);
+
+  // Trigger background loading of non-priority folders when priority folders are done and indexed
+  useEffect(() => {
+    if (backgroundImportQueue.length === 0 || backgroundImportStarted || !driveToken) return;
+
+    // Check if any priority folders are still running in background
+    const activePriorityFolderNames = activeAutoImports.filter(a => priorityImportIds.has(a.name));
+    if (activePriorityFolderNames.length > 0) return;
+
+    // Check if any documents belonging to priority versions are still pending/indexing
+    const indexingPriorityFiles = uploadedFiles.filter(f => 
+      f.caseId === currentCaseId && 
+      priorityImportIds.has(f.version || '') && 
+      (f.indexStatus === 'IDLE' || f.indexStatus === 'INDEXING')
+    );
+    if (indexingPriorityFiles.length > 0) return;
+
+    // Everything priority is ready and indexed! Start background imports
+    console.log("Priority folders downloaded and indexed. Starting background imports...");
+    setBackgroundImportStarted(true);
+    backgroundImportQueue.forEach((folder) => {
+      autoImportSingleVersionFolder(folder.id, folder.name, driveToken);
+    });
+    setBackgroundImportQueue([]);
+  }, [uploadedFiles, activeAutoImports, backgroundImportQueue, priorityImportIds, backgroundImportStarted, currentCaseId, driveToken]);
 
   const allFiles = [...uploadedFiles];
 
@@ -1640,10 +1951,17 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
       setSupportFileIds(prev => prev.filter(fId => fId !== id));
 
       if (user) {
+        if (isFirebaseQuotaExceeded) {
+          console.warn("Cloud deletion bypassed during Free Tier quota limit.");
+          return;
+        }
         try {
           await deleteDoc(doc(db, `users/${user.uid}/files`, id));
-        } catch (e) {
+        } catch (e: any) {
           console.error("Chyba při mazání souboru z cloudu:", e);
+          if (e && (e.message?.includes('quota') || e.code === 'resource-exhausted' || e.message?.includes('exhausted'))) {
+            setIsFirebaseQuotaExceeded(true);
+          }
         }
       }
     }
@@ -2153,12 +2471,58 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
         } catch (err) {
           console.error("Failed to load ZIP", err);
         }
+      } else if (ext === 'docx') {
+        const docxFileId = newFileId;
+        newFiles.push({ 
+          id: docxFileId, 
+          name: file.name, type: 'DOCX', isUploaded: true, timestamp: Date.now(), batchId,
+          category: (currentVersion.toLowerCase().includes('skil') || file.name.toLowerCase().includes('skil')) ? 'SKILLS' : 'ATTACH', version: currentVersion, caseId: currentCaseId,
+          indexStatus: 'INDEXING',
+          content: 'Parsování dokumentu...'
+        });
+
+        const fileReader = new FileReader();
+        fileReader.onload = async (e) => {
+          try {
+            if (e.target?.result) {
+              const zip = await JSZip.loadAsync(e.target.result as ArrayBuffer);
+              const docXmlFile = zip.file("word/document.xml");
+              if (!docXmlFile) {
+                throw new Error("Chybí word/document.xml");
+              }
+              const xmlContent = await docXmlFile.async("text");
+              const wtRegex = /<w:t[^>]*>([\s\S]*?)<\/w:t>/g;
+              let match;
+              const textParts: string[] = [];
+              while ((match = wtRegex.exec(xmlContent)) !== null) {
+                textParts.push(match[1]);
+              }
+              const text = textParts.join(" ")
+                .replace(/&amp;/g, '&')
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .replace(/&quot;/g, '"')
+                .replace(/&apos;/g, "'")
+                .trim();
+              
+              setUploadedFiles(prev => prev.map(f => f.id === docxFileId ? { ...f, content: text, indexStatus: 'IDLE' } : f));
+              if (driveToken) {
+                backgroundUploadToDrive(file.name, text, currentVersion);
+              }
+            }
+          } catch (err: any) {
+            console.error("Docx parsing failed:", err);
+            const errMsg = `[Chyba parsování DOCX]: ${err?.message || String(err)}`;
+            setUploadedFiles(prev => prev.map(f => f.id === docxFileId ? { ...f, content: errMsg, indexStatus: 'ERROR' } : f));
+          }
+        };
+        fileReader.readAsArrayBuffer(file);
       } else {
         const isText = ext && ['txt', 'json', 'md', 'csv', 'xml', 'yaml', 'yml', 'html', 'js', 'ts', 'jsx', 'tsx'].includes(ext);
         let initialContent = '';
         if (!isText) {
           if (ext === 'pdf') {
-            initialContent = `[Nahraný binární PDF soubor: ${file.name}. Pro plnou analýzu doporučujeme převést PDF do Google Dokumentů nebo čistého textu.]`;
+            initialContent = `[Nahraný binární PDF soubor: ${file.name}. Pro plnou analýzu doporučujeme převedení PDF do Google Dokumentů nebo čistého textu.]`;
           } else {
             initialContent = `[Nahraný binární soubor: ${file.name} (${ext?.toUpperCase() || 'BIN'}). Pro plnou analýzu doporučujeme nahrát v textovém formátu.]`;
           }
@@ -2242,10 +2606,17 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
     setCompareVersionIds(prev => prev.filter(vId => vId !== id));
     
     if (user) {
+      if (isFirebaseQuotaExceeded) {
+        console.warn("Cloud history deletion bypassed during Free Tier quota limit.");
+        return;
+      }
       try {
         await deleteDoc(doc(db, `users/${user.uid}/history`, id));
-      } catch (e) {
+      } catch (e: any) {
         console.error("Chyba při mazání záznamu historie z cloudu:", e);
+        if (e && (e.message?.includes('quota') || e.code === 'resource-exhausted' || e.message?.includes('exhausted'))) {
+          setIsFirebaseQuotaExceeded(true);
+        }
       }
     }
   };
@@ -2454,6 +2825,51 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
     });
   };
 
+  const getPillarPerformanceData = () => {
+    const completedTasks = auditQueue.filter(t => t.status === 'done' && t.caseId === currentCaseId);
+    
+    const pillarsList = [
+      { id: 'P01', name: 'Značky' },
+      { id: 'P02', name: 'Soulad' },
+      { id: 'P03', name: 'Paradoxy' },
+      { id: 'P04', name: 'Asymetrie' },
+      { id: 'P05', name: 'Cirkularita' },
+      { id: 'P06', name: 'Integrita' },
+      { id: 'P07', name: 'Atomy' },
+      { id: 'P08', name: 'Red Team' },
+      { id: 'P09', name: 'Hierarchie' },
+      { id: 'P10', name: 'Dieta' },
+      { id: 'P11', name: 'Rizika' },
+      { id: 'P12', name: 'Diference' },
+      { id: 'P13', name: 'Admin' },
+      { id: 'P14', name: 'Přílohy' },
+    ];
+
+    if (completedTasks.length === 0) {
+      // exemplary demo data in case there are no active completed tasks
+      return pillarsList.map((p, idx) => ({
+        name: p.name,
+        'Úspěšnost (%)': [85, 78, 92, 64, 88, 90, 75, 82, 89, 73, 80, 85, 91, 79][idx],
+        'Aktivních auditů': [5, 4, 2, 3, 4, 5, 5, 2, 4, 3, 5, 4, 3, 4][idx]
+      }));
+    }
+
+    return pillarsList.map(p => {
+      const relevantTasks = completedTasks.filter(t => t.pillars.includes(p.id));
+      let totalScore = 0;
+      relevantTasks.forEach(t => {
+        const parsed = parseJsonFromResult(t.result);
+        totalScore += (parsed?.score || 85);
+      });
+      
+      return {
+        name: p.name,
+        'Úspěšnost (%)': relevantTasks.length > 0 ? Math.round(totalScore / relevantTasks.length) : 0,
+        'Aktivních auditů': relevantTasks.length
+      };
+    });
+  };
+
   return (
     <div className="min-h-screen bg-[#0d0d0d] text-[#CCC] selection:bg-[#C5A059] selection:text-black font-sans">
       <AnimatePresence>
@@ -2551,6 +2967,48 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
       </header>
 
       <main className="mx-auto max-w-7xl px-6 pb-20">
+        {error && (
+          <div className="mb-8 border border-red-900/50 bg-red-950/20 px-6 py-4 flex justify-between items-center rounded-sm">
+            <div className="flex items-center gap-3">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              <p className="text-xs text-red-400 font-mono uppercase tracking-widest leading-relaxed">
+                {error}
+              </p>
+            </div>
+            <button 
+              onClick={() => setError(null)} 
+              className="text-red-600 hover:text-white transition-colors p-1"
+              title="Zavřít upozornění"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
+
+        {isFirebaseQuotaExceeded && (
+          <div className="mb-8 border border-amber-900/50 bg-amber-950/10 px-6 py-5 flex justify-between items-start rounded-sm">
+            <div className="flex gap-4">
+              <span className="w-2.5 h-2.5 mt-1 rounded-full bg-[#C5A059] animate-pulse shrink-0" />
+              <div className="space-y-1">
+                <h4 className="text-[10px] font-black uppercase text-[#C5A059] tracking-widest">AUTONOMNÍ LOKÁLNÍ REŽIM AKTIVNÍ</h4>
+                <p className="text-xs text-[#AAA] font-mono leading-relaxed max-w-4xl">
+                  Dosáhli jste bezplatného limitu zápisů do cloudové databáze (Free Tier Quota). 
+                  Aplikace plynule přešla do plně autonomního offline režimu. 
+                  Veškerá Vaše data, spisy i historie jsou bezpečně zrcadleny ve Vašem prohlížeči. 
+                  Pro synchronizaci s cloudem stačí vyčkat na reset limitů.
+                </p>
+              </div>
+            </div>
+            <button 
+              onClick={() => setIsFirebaseQuotaExceeded(false)} 
+              className="text-amber-700 hover:text-white transition-colors p-1"
+              title="Zavřít"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
+
         <AnimatePresence>
           {showHistory && (
             <motion.section initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="mb-12 overflow-hidden border-b border-[#222] pb-12">
@@ -3197,7 +3655,7 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
                     <div className={cn("text-[10px] font-mono", item.status === 'processing' ? "text-[#C5A059]" : "text-[#333] opacity-50")}>{item.id}</div>
                     <div className="flex flex-col gap-1">
                       <div className={cn("text-[10px] font-black tracking-widest uppercase", item.status === 'done' ? "text-[#888]" : "text-[#666]")}>
-                        {item.version} // {item.files[0]} {item.files.length > 1 ? `+ ${item.files.length - 1} další` : ''}
+                        {item.title ? `${item.title} (${item.version})` : item.version} // {item.files[0]} {item.files.length > 1 ? `+ ${item.files.length - 1} další` : ''}
                       </div>
                       <div className="text-[8px] font-mono text-[#333] truncate italic opacity-50">{item.pillars.join(' • ')}</div>
                     </div>
@@ -3441,14 +3899,16 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
               <p className="text-[9px] font-mono text-[#555] mt-1">SÍLA EXCELENCE JURIS-AUDIT PROCESORU PRO VERZE SOUBORŮ</p>
             </div>
             <div className="text-[9px] font-mono text-[#888] bg-[#111] px-3 py-1.5 border border-[#222]">
-              AKTIVNÍ PROCESOR: <span className="text-amber-500 font-black">{
-                appMode === 'AUDIT' ? '⚡ FORENZNÍ JURIS-AUDIT' :
-                appMode === 'COMPOSE' ? '✍️ KO-EDITAČNÍ DRAFTING' :
-                appMode === 'VERTICAL' ? '⏳ CHRONO-VERTIKÁLNÍ EVOLUCE' : '🔗 OPTIMIZAČNÍ SYNTÉZA KOMBÍK'
-              }</span>
+               AKTIVNÍ PROCESOR: <span className="text-amber-500 font-black">{
+                 appMode === 'AUDIT' ? '⚡ FORENZNÍ JURIS-AUDIT' :
+                 appMode === 'COMPOSE' ? '✍️ KO-EDITAČNÍ DRAFTING' :
+                 appMode === 'VERTICAL' ? '⏳ CHRONO-VERTIKÁLNÍ EVOLUCE' :
+                 appMode === 'DASHBOARD' ? '📊 ANALYTICKÝ DASHBOARD' :
+                 appMode === 'PRE_SHIP' ? '⚓ PRE-SHIP KONTROLA / REVIZE' : '🔗 OPTIMIZAČNÍ SYNTÉZA KOMBÍK'
+               }</span>
             </div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
             <button 
               onClick={() => setAppMode('AUDIT')}
               className={cn(
@@ -3520,11 +3980,67 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
               </div>
               {appMode === 'SYNTHESIS' && <div className="absolute top-0 right-0 w-1 h-full bg-[#C5A059]" />}
             </button>
+
+            <button 
+              onClick={() => setAppMode('DASHBOARD')}
+              className={cn(
+                "p-5 text-left border transition-all flex flex-col justify-between group h-36 relative overflow-hidden",
+                appMode === 'DASHBOARD' ? "bg-[#C5A059]/10 border-[#C5A059]" : "bg-[#111]/30 border-[#222] hover:border-[#444]"
+              )}
+            >
+              <div className="flex justify-between items-start w-full">
+                <TrendingUp size={18} className={cn(appMode === 'DASHBOARD' ? "text-[#C5A059]" : "text-[#555] group-hover:text-[#C5A059]")} />
+                <span className="text-[8px] font-mono text-white/20">PROC-V5</span>
+              </div>
+              <div className="mt-4">
+                <div className="text-[10px] font-black uppercase tracking-wider text-white">Analytický Dashboard</div>
+                <div className="text-[9px] text-[#555] mt-1 leading-normal">Forenzní metriky úspěšnosti pilířů v čase, kvalita spisu a auditní registr.</div>
+              </div>
+              {appMode === 'DASHBOARD' && <div className="absolute top-0 right-0 w-1 h-full bg-[#C5A059]" />}
+            </button>
+
+            <button 
+              onClick={() => setAppMode('PRE_SHIP')}
+              className={cn(
+                "p-5 text-left border transition-all flex flex-col justify-between group h-36 relative overflow-hidden",
+                appMode === 'PRE_SHIP' ? "bg-[#C5A059]/10 border-[#C5A059]" : "bg-[#111]/30 border-[#222] hover:border-[#444]"
+              )}
+            >
+              <div className="flex justify-between items-start w-full">
+                <ShieldCheck size={18} className={cn(appMode === 'PRE_SHIP' ? "text-[#C5A059]" : "text-[#555] group-hover:text-[#C5A059]")} />
+                <span className="text-[8px] font-mono text-white/20">PROC-V6</span>
+              </div>
+              <div className="mt-4">
+                <div className="text-[10px] font-black uppercase tracking-wider text-white">⚓ Pre-Ship Kontrola</div>
+                <div className="text-[9px] text-[#555] mt-1 leading-normal">Slučování analýz, pre-ship automatické testy, společná kontrola kapitol.</div>
+              </div>
+              {appMode === 'PRE_SHIP' && <div className="absolute top-0 right-0 w-1 h-full bg-[#C5A059]" />}
+            </button>
           </div>
         </section>
 
         <div className="grid gap-12 lg:grid-cols-12 border-t border-[#111] pt-12">
-          <section className="lg:col-span-12 space-y-8">
+          {appMode === 'DASHBOARD' ? (
+            <AnalyticsDashboard
+              auditQueue={auditQueue}
+              uploadedFiles={uploadedFiles}
+              currentCaseId={currentCaseId}
+              setAppMode={setAppMode}
+              setActiveQueueId={setActiveQueueId}
+              currentVersion={currentVersion}
+              parseJsonFromResult={parseJsonFromResult}
+              getRechartsData={getRechartsData}
+              getPillarPerformanceData={getPillarPerformanceData}
+            />
+          ) : appMode === 'PRE_SHIP' ? (
+            <PreShipControlView
+              uploadedFiles={uploadedFiles}
+              auditQueue={auditQueue}
+              driveToken={driveToken}
+            />
+          ) : (
+            <>
+              <section className="lg:col-span-12 space-y-8">
             <div className="flex items-center justify-between bg-[#151515] border border-[#222] px-6 py-3">
               <h2 className="text-[11px] uppercase tracking-[0.2em] text-[#C5A059] font-black">
                 {appMode === 'AUDIT' ? '(01) PETIČNÍ_STRING_TERMINÁL' : 
@@ -3863,6 +4379,8 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
               </AnimatePresence>
             </div>
           </section>
+            </>
+          )}
         </div>
       </main>
 
@@ -3937,6 +4455,57 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
                 </section>
 
                 <section className="space-y-4 pt-8 border-t border-[#111]">
+                  <h3 className="text-[10px] font-black uppercase text-[#666] tracking-[0.4em] mb-8">HANDSHAKE POLICY PROTOKOL & ADRESÁŘOVÁ STRUKTURA CONTROLY</h3>
+                  <div className="bg-[#050505] p-6 border border-[#222] font-mono text-[10px] space-y-4">
+                    <p className="text-[#C5A059]">Pro uvolnění systémových zámků doručovací fronty (Pipeline Locks Release) je definován následující Handshake protokol:</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-[#999] leading-relaxed">
+                      <div>
+                        <div className="text-white mb-2 underline">Adresářová struktura na GDrive:</div>
+                        <p>Ve složce pojmenované přesně <span className="text-[#C5A059]">PRE_Ship_Final_Control</span>: </p>
+                        <div className="bg-[#111] p-3 border border-[#222] text-[#777] mt-1 space-y-1">
+                          <div>├── <span className="text-white">JURIS_UNLOCK_CERTIFICATE.json</span> (vygenerovaný odblokátor)</div>
+                          <div>├── <span className="text-white">*.pdf</span> (podepsané hlavní podání)</div>
+                          <div>├── <span className="text-white">*.zip</span> (doprovodné důkazy a auditní stopy)</div>
+                          <div>└── <span className="text-white">handshake_release_notes.txt</span> (přepravní text)</div>
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white mb-2 underline">Fungování Handshake:</div>
+                        <p>
+                          1. V menu ⚓ <strong>Pre-Ship Kontrola</strong> spustíte autonomní compliance testy.<br />
+                          2. Systém vygeneruje bezpečný JSON certifikát s časovým razítkem a unikátním hash klíčem.<br />
+                          3. Kliknutím na <strong>"Uložit certifikát na Disk"</strong> zapíšete soubor na GDrive. CI/CD pipeline monitoruje tuto složku, najde certifikát a uvolní zámky pro přenos do datové schránky.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="space-y-4 pt-8 border-t border-[#111]">
+                  <h3 className="text-[10px] font-black uppercase text-[#666] tracking-[0.4em] mb-8">AUTHENTICATION & GOOGLE TASKS TROUBLESHOOTING</h3>
+                  <div className="bg-rose-950/10 p-6 border border-rose-950/40 font-mono text-[10px] space-y-4">
+                    <p className="text-rose-400 font-bold">Pokud se Vám nedaří přihlásit ke Google Tasks / Disku nebo Firebase hlásí chybu domény:</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-[#999] leading-relaxed">
+                      <div>
+                        <div className="text-white mb-2 underline">A] Chyba Authorized Domain (Firebase Console):</div>
+                        <p>
+                          Při povolování v Firebase administraci (Authentication → Settings → Authorized Domains) **NESMÍ** být doména zadána s portem (např. <code className="text-rose-300">localhost:8000</code> je neplatná konfigurace). Zadejte pouze čisté domény:<br />
+                          • <code className="text-[#C5A059]">localhost</code> (pro lokální vývoj na jakémkoliv portu)<br />
+                          • <code className="text-white">ais-dev-zlbq3lae3dpllrbz5iwujp-521807296593.europe-west2.run.app</code><br />
+                          • ...a vaše další produkční či sdílené domény Cloud Run kontejneru.
+                        </p>
+                      </div>
+                      <div>
+                        <div className="text-white mb-2 underline">B] Povolení Google Tasks Scopes:</div>
+                        <p>
+                          Před prvním použitím si v levém panelu v sekci Google disků klikněte na sign-in tlačítko Google a odsouhlaste dodatečná oprávnění ke čtení a zápisu Vašich Google Tasks. Pokud integrace zůstává neaktivní, odhlaste se kliknutím na ikonu úniku a přihlaste se znovu k pročištění token cache.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="space-y-4 pt-8 border-t border-[#111]">
                   <div className="space-y-4">
                     <div className="flex items-center gap-4 text-[10px] font-mono">
                       <div className="px-2 py-1 bg-[#222] text-white">SELECT</div>
@@ -3954,7 +4523,7 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
                 </section>
 
                 <div className="p-8 bg-[#C5A059]/5 border border-[#C5A059]/20">
-                  <p className="text-[9px] font-mono text-[#C5A059] uppercase leading-relaxed font-black">
+                  <p className="text-[9px] font-mono text-[#C5A059] uppercase leading-relaxed font-black font-sans">
                     UPOZORNĚNÍ: SYSTÉM VYŽADUJE AKTIVNÍ PŘIPOJENÍ K §LG13§ CLOUD ENGINE. VEŠKERÁ DATA JSOU ŠIFROVÁNA TLS 1.3. SYSTÉM NEPOSKYTUJE PRÁVNÍ PORADENSTVÍ, ALE FORENZNÍ DOKUMENTAČNÍ ASISTENCI.
                   </p>
                 </div>
@@ -4304,6 +4873,132 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
                   </div>
                 </div>
               )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Priority Folder Selector Modal */}
+      <AnimatePresence>
+        {driveFoldersToImportPrompt && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/95 backdrop-blur-md p-6">
+            <motion.div 
+               initial={{ scale: 0.9, opacity: 0 }}
+               animate={{ scale: 1, opacity: 1 }}
+               exit={{ scale: 0.9, opacity: 0 }}
+               className="bg-[#111] border border-[#C5A059] p-8 max-w-lg w-full shadow-[0_0_50px_rgba(197,160,89,0.3)] flex flex-col max-h-[85vh] relative overflow-hidden"
+            >
+              <div className="flex justify-between items-center mb-6 border-b border-[#222] pb-4 shrink-0">
+                <div className="flex items-center gap-3">
+                  <Database className="text-[#C5A059]" size={22} />
+                  <h2 className="text-sm font-black uppercase tracking-widest text-[#C5A059]">CHYTRÉ NAČTENÍ HIERARCHIE</h2>
+                </div>
+                <button onClick={() => setDriveFoldersToImportPrompt(null)} className="text-[#444] hover:text-white transition-colors">
+                  <X size={20}/>
+                </button>
+              </div>
+
+              <div className="space-y-4 flex-1 flex flex-col overflow-hidden">
+                <p className="text-[11px] text-zinc-400 font-sans leading-relaxed">
+                  V úložišti <strong className="text-white">Google_LG13_Lex</strong> bylo nalezeno <strong className="text-[#C5A059]">{driveFoldersToImportPrompt.length}</strong> verzovaných složek s daty k forenzní analýze. 
+                  Chcete nahrát vše najednou, nebo označit ty s nejvyšší prioritou? Zbytek složek se dohraje a zindexuje automaticky na pozadí.
+                </p>
+
+                <div className="flex items-center justify-between bg-[#151515]/20 border border-[#222]/40 px-3 py-2 rounded-sm shrink-0">
+                  <span className="text-[8px] font-black uppercase tracking-wider text-zinc-500">Výběr Priorit:</span>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const updated = driveFoldersToImportPrompt.map(folder => ({ ...folder, selected: true }));
+                        setDriveFoldersToImportPrompt(updated);
+                      }}
+                      className="text-[9px] font-black uppercase text-[#C5A059] border border-[#C5A059]/20 px-2.5 py-1 hover:bg-[#C5A059]/10 transition-all bg-transparent cursor-pointer"
+                    >
+                      ✓ Označit vše
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const updated = driveFoldersToImportPrompt.map(folder => ({ ...folder, selected: false }));
+                        setDriveFoldersToImportPrompt(updated);
+                      }}
+                      className="text-[9px] font-black uppercase text-zinc-400 border border-zinc-800 px-2.5 py-1 hover:text-white hover:border-zinc-700 transition-all bg-transparent cursor-pointer"
+                    >
+                      ✗ Smazat výběr (označit 0)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto border border-[#222] bg-[#0c0c0c] p-4 space-y-2 rounded-sm custom-scrollbar">
+                  {driveFoldersToImportPrompt.map((f, idx) => (
+                    <label key={f.id} className="flex items-center gap-3 p-2 hover:bg-[#151515] rounded cursor-pointer transition-colors border border-transparent hover:border-[#222]">
+                      <input 
+                        type="checkbox" 
+                        checked={f.selected} 
+                        onChange={(e) => {
+                          const updated = [...driveFoldersToImportPrompt];
+                          updated[idx].selected = e.target.checked;
+                          setDriveFoldersToImportPrompt(updated);
+                        }}
+                        className="rounded border-[#C5A059] text-[#C5A059] focus:ring-[#C5A059] w-4 h-4 bg-black"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-black text-white uppercase tracking-wider">{f.name}</p>
+                        <p className="text-[9px] font-mono text-zinc-500">ID: {f.id}</p>
+                      </div>
+                      <span className="text-[9px] font-mono text-[#C5A059] bg-[#C5A059]/10 px-2 py-0.5 rounded uppercase">
+                        {f.selected ? 'Prioritní' : 'Na pozadí'}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 shrink-0 pt-4">
+                  <button
+                    onClick={() => {
+                      if (!driveToken) return;
+                      // Load All
+                      driveFoldersToImportPrompt.forEach(folder => {
+                        autoImportSingleVersionFolder(folder.id, folder.name, driveToken);
+                      });
+                      setDriveFoldersToImportPrompt(null);
+                    }}
+                    className="w-full py-3 border border-[#333] hover:border-[#C5A059] font-mono text-[10px] uppercase font-black tracking-wider text-zinc-400 hover:text-white transition-all bg-transparent cursor-pointer"
+                  >
+                    Nahrát vše najednou
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (!driveToken) return;
+                      const selectedFolders = driveFoldersToImportPrompt.filter(f => f.selected);
+                      const unselectedFolders = driveFoldersToImportPrompt.filter(f => !f.selected);
+
+                      if (selectedFolders.length === 0) {
+                        alert("Prosím zvolte alespoň jednu složku jako prioritní, nebo zvolte možnost nahrát vše najednou.");
+                        return;
+                      }
+
+                      // Set up priority and background tracking
+                      const prioritySet = new Set(selectedFolders.map(f => f.name));
+                      setPriorityImportIds(prioritySet);
+                      setBackgroundImportQueue(unselectedFolders.map(f => ({ id: f.id, name: f.name })));
+                      setBackgroundImportStarted(false);
+
+                      // Download priority ones immediately
+                      selectedFolders.forEach((folder) => {
+                        autoImportSingleVersionFolder(folder.id, folder.name, driveToken);
+                      });
+
+                      setDriveFoldersToImportPrompt(null);
+                      alert(`Spuštěno prioritní nahrávání pro ${selectedFolders.length} složek. Zbylých ${unselectedFolders.length} složek bude dohráno na pozadí poté, co prioritní dojdou do stavu 'DONE' a budou připraveny k analýze.`);
+                    }}
+                    className="w-full py-3 bg-[#C5A059] hover:bg-white text-black font-mono text-[10px] uppercase font-black tracking-wider transition-all cursor-pointer"
+                  >
+                    Prioritně vybrané & zbytek pozadí
+                  </button>
+                </div>
+              </div>
             </motion.div>
           </div>
         )}

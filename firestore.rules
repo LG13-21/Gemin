@@ -39,7 +39,14 @@ service cloud.firestore {
              data.userId == request.auth.uid &&
              (data.get('content', '') is string && data.get('content', '').size() <= 1048576) &&
              (data.get('category', 'OTHER') is string) &&
-             (data.get('indexStatus', 'IDLE') in ['IDLE', 'INDEXING', 'DONE', 'ERROR']);
+             (data.get('indexStatus', 'IDLE') in ['IDLE', 'INDEXING', 'DONE', 'ERROR']) &&
+             (!data.keys().hasAny(['isArchived']) || data.isArchived is bool) &&
+             (!data.keys().hasAny(['driveFolderId']) || data.driveFolderId is string) &&
+             (!data.keys().hasAny(['driveFileId']) || data.driveFileId is string) &&
+             (!data.keys().hasAny(['caseId']) || data.caseId is string) &&
+             (!data.keys().hasAny(['version']) || data.version is string) &&
+             (!data.keys().hasAny(['batchId']) || data.batchId is string) &&
+             (!data.keys().hasAny(['isUploaded']) || data.isUploaded is bool);
     }
 
     function isValidCaseRecord(data) {
@@ -82,9 +89,24 @@ service cloud.firestore {
         allow list: if isOwner(userId);
         allow create: if isOwner(userId) && isValidId(fileId) && isValidFileEntry(incoming());
         allow update: if isOwner(userId) && isValidFileEntry(incoming()) && (
-          (incoming().diff(existing()).affectedKeys().hasOnly(['isArchived'])) ||
-          (incoming().diff(existing()).affectedKeys().hasOnly(['category', 'insight', 'indexStatus'])) ||
-          (incoming().diff(existing()).affectedKeys().hasOnly(['content', 'indexStatus']))
+          // Action 1: Toggle archive state
+          incoming().diff(existing()).affectedKeys().hasOnly(['isArchived']) ||
+          // Action 2: Update parsing and index metadata
+          incoming().diff(existing()).affectedKeys().hasOnly(['category', 'insight', 'indexStatus']) ||
+          // Action 3: Save analysis results and set status
+          incoming().diff(existing()).affectedKeys().hasOnly(['content', 'indexStatus']) ||
+          // Action 4: Assign to Case or Version snapshot
+          incoming().diff(existing()).affectedKeys().hasOnly(['caseId', 'version']) ||
+          // Action 5: Change Case or Version individually
+          incoming().diff(existing()).affectedKeys().hasOnly(['caseId']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['version']) ||
+          // Action 6: Google Drive association 
+          incoming().diff(existing()).affectedKeys().hasOnly(['driveFolderId', 'driveFileId']) ||
+          // Action 7: General user sync of multiple mutable fields (preserving immutability of id, name, timestamp, userId)
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'isArchived', 'category', 'insight', 'indexStatus', 'content', 
+            'caseId', 'version', 'driveFolderId', 'driveFileId', 'isUploaded', 'batchId'
+          ])
         );
         allow delete: if isOwner(userId);
       }
