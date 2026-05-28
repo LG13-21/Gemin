@@ -1,9 +1,8 @@
 {
-  "projectId": "remixed-project-id",
-  "appId": "remixed-app-id",
-  "apiKey": "remixed-api-key",
-  "authDomain": "remixed-auth-domain",
-  "storageBucket": "remixed-storage-bucket",
-  "messagingSenderId": "remixed-messaging-sender-id",
-  "measurementId": "remixed-measurement-id"
+  "apiKey": "AIzaSyA4gegEe_HXaig6I5SgQOeRME8y3yoHaV4",
+  "authDomain": "excellent-booking-rv7sv.firebaseapp.com",
+  "projectId": "excellent-booking-rv7sv",
+  "storageBucket": "excellent-booking-rv7sv.firebasestorage.app",
+  "messagingSenderId": "531754738410",
+  "appId": "1:531754738410:web:bd5bd32084be7a01ab6d93"
 }
