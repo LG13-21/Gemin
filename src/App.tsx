@@ -198,6 +198,13 @@ export default function App() {
   const [tasksError, setTasksError] = useState<string | null>(null);
   const [successTaskMessage, setSuccessTaskMessage] = useState<string | null>(null);
 
+  // Bezpečný a plně interaktivní in-app potvrzovací dialog (nahrazuje window.confirm náchylný k chybám v iframe)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
+
   const isResetting = useRef(false);
   const isLoaded = useRef(false);
   const stopRequestedRef = useRef(false);
@@ -303,15 +310,20 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
 
   const deleteGoogleTaskNow = async (taskId: string) => {
     if (!driveToken || !googleTasksListId) return;
-    if (!confirm('Opravdu si přejete smazat tento úkol z Google Tasks?')) return;
-    try {
-      await deleteJurisTask(driveToken, googleTasksListId, taskId);
-      setSuccessTaskMessage('Úkol byl smazán z Google Tasks.');
-      await fetchTasksFromGoogle(driveToken);
-      setTimeout(() => setSuccessTaskMessage(null), 4500);
-    } catch (e: any) {
-      alert(`Nepodařilo se smazat úkol: ${e.message}`);
-    }
+    setConfirmDialog({
+      title: 'SMAZÁNÍ ÚKOLU Z GOOGLE TASKS',
+      message: 'Opravdu si přejete smazat tento úkol z Vašeho Google Tasks účtu?',
+      onConfirm: async () => {
+        try {
+          await deleteJurisTask(driveToken, googleTasksListId, taskId);
+          setSuccessTaskMessage('Úkol byl smazán z Google Tasks.');
+          await fetchTasksFromGoogle(driveToken);
+          setTimeout(() => setSuccessTaskMessage(null), 4500);
+        } catch (e: any) {
+          alert(`Nepodařilo se smazat úkol: ${e.message}`);
+        }
+      }
+    });
   };
 
   const registerTaskFromGoogleToQueue = (task: GoogleTask) => {
@@ -1945,26 +1957,30 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
   };
 
   const deleteFile = async (id: string) => {
-    if (confirm('Opravdu chcete smazat tento soubor?')) {
-      setUploadedFiles(prev => prev.filter(f => f.id !== id));
-      setSelectedFileIds(prev => prev.filter(fId => fId !== id));
-      setSupportFileIds(prev => prev.filter(fId => fId !== id));
+    setConfirmDialog({
+      title: 'SMAZAT SOUBOR',
+      message: 'Opravdu chcete smazat tento konkrétní soubor ze systému?',
+      onConfirm: async () => {
+        setUploadedFiles(prev => prev.filter(f => f.id !== id));
+        setSelectedFileIds(prev => prev.filter(fId => fId !== id));
+        setSupportFileIds(prev => prev.filter(fId => fId !== id));
 
-      if (user) {
-        if (isFirebaseQuotaExceeded) {
-          console.warn("Cloud deletion bypassed during Free Tier quota limit.");
-          return;
-        }
-        try {
-          await deleteDoc(doc(db, `users/${user.uid}/files`, id));
-        } catch (e: any) {
-          console.error("Chyba při mazání souboru z cloudu:", e);
-          if (e && (e.message?.includes('quota') || e.code === 'resource-exhausted' || e.message?.includes('exhausted'))) {
-            setIsFirebaseQuotaExceeded(true);
+        if (user) {
+          if (isFirebaseQuotaExceeded) {
+            console.warn("Cloud deletion bypassed during Free Tier quota limit.");
+            return;
+          }
+          try {
+            await deleteDoc(doc(db, `users/${user.uid}/files`, id));
+          } catch (e: any) {
+            console.error("Chyba při mazání souboru z cloudu:", e);
+            if (e && (e.message?.includes('quota') || e.code === 'resource-exhausted' || e.message?.includes('exhausted'))) {
+              setIsFirebaseQuotaExceeded(true);
+            }
           }
         }
       }
-    }
+    });
   };
 
   const speakText = (text?: string) => {
@@ -1977,38 +1993,42 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
   };
 
   const clearAllData = async () => {
-    if (confirm('VAROVÁNÍ: Opravdu chcete smazat ABSOLUTNĚ VŠECHNA data?\nTato akce nevratně odstraní všechny spisy, soubory, indexy i historii úloh.')) {
-      isResetting.current = true;
-      localStorage.clear();
-      // Secondary explicit clear for known keys
-      const keys = ['juris_files', 'juris_queue', 'juris_strategy', 'juris_history', 'juris_cases', 'juris_current_case_id', 'juris_version', 'juris_git_context'];
-      keys.forEach(k => localStorage.removeItem(k));
-      
-      if (user) {
-        try {
-          const batch = writeBatch(db);
-          const filesSnap = await getDocs(collection(db, `users/${user.uid}/files`));
-          filesSnap.forEach(d => batch.delete(d.ref));
-          
-          const queueSnap = await getDocs(collection(db, `users/${user.uid}/queue`));
-          queueSnap.forEach(d => batch.delete(d.ref));
-          
-          const historySnap = await getDocs(collection(db, `users/${user.uid}/history`));
-          historySnap.forEach(d => batch.delete(d.ref));
-          
-          const casesSnap = await getDocs(collection(db, `users/${user.uid}/cases`));
-          casesSnap.forEach(d => batch.delete(d.ref));
-          
-          batch.delete(doc(db, `users/${user.uid}/settings`, 'current'));
-          await batch.commit();
-        } catch (e) {
-          console.error("Chyba při mazání databáze z cloudu:", e);
+    setConfirmDialog({
+      title: 'ABSOLUTNÍ DESTRUKCE DAT (RESET SYSTÉMU)',
+      message: 'VAROVÁNÍ: Opravdu chcete smazat ABSOLUTNĚ VŠECHNA data? Tato akce nevratně odstraní všechny spisy, soubory, indexy i historii úloh z lokálního úložiště i cloudu.',
+      onConfirm: async () => {
+        isResetting.current = true;
+        localStorage.clear();
+        // Secondary explicit clear for known keys
+        const keys = ['juris_files', 'juris_queue', 'juris_strategy', 'juris_history', 'juris_cases', 'juris_current_case_id', 'juris_version', 'juris_git_context'];
+        keys.forEach(k => localStorage.removeItem(k));
+        
+        if (user) {
+          try {
+            const batch = writeBatch(db);
+            const filesSnap = await getDocs(collection(db, `users/${user.uid}/files`));
+            filesSnap.forEach(d => batch.delete(d.ref));
+            
+            const queueSnap = await getDocs(collection(db, `users/${user.uid}/queue`));
+            queueSnap.forEach(d => batch.delete(d.ref));
+            
+            const historySnap = await getDocs(collection(db, `users/${user.uid}/history`));
+            historySnap.forEach(d => batch.delete(d.ref));
+            
+            const casesSnap = await getDocs(collection(db, `users/${user.uid}/cases`));
+            casesSnap.forEach(d => batch.delete(d.ref));
+            
+            batch.delete(doc(db, `users/${user.uid}/settings`, 'current'));
+            await batch.commit();
+          } catch (e) {
+            console.error("Chyba při mazání databáze z cloudu:", e);
+          }
         }
-      }
 
-      // Force reload to clean state
-      window.location.href = window.location.origin + window.location.pathname;
-    }
+        // Force reload to clean state
+        window.location.href = window.location.origin + window.location.pathname;
+      }
+    });
   };
 
   const toggleFileSelection = (id: string, type: 'SELECT' | 'SUPPORT' | 'BULK') => {
@@ -2033,26 +2053,30 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
     if (selectedBulkIds.length === 0) return;
     
     if (action === 'DELETE') {
-      if (confirm(`Opravdu chcete smazat ${selectedBulkIds.length} souborů?`)) {
-        const idsToRemove = new Set(selectedBulkIds);
-        setUploadedFiles(prev => prev.filter(f => !idsToRemove.has(f.id)));
-        setSelectedFileIds(prev => prev.filter(id => !idsToRemove.has(id)));
-        setSupportFileIds(prev => prev.filter(id => !idsToRemove.has(id)));
-        
-        if (user) {
-          try {
-            const batch = writeBatch(db);
-            selectedBulkIds.forEach(id => {
-              batch.delete(doc(db, `users/${user.uid}/files`, id));
-            });
-            await batch.commit();
-          } catch (e) {
-            console.error("Chyba při hromadném mazání souborů z cloudu:", e);
+      setConfirmDialog({
+        title: 'HROMADNÉ SMAZÁNÍ SOUBORŮ',
+        message: `Opravdu chcete smazat ${selectedBulkIds.length} vybraných souborů ze systému? Tato akce je nevratná.`,
+        onConfirm: async () => {
+          const idsToRemove = new Set(selectedBulkIds);
+          setUploadedFiles(prev => prev.filter(f => !idsToRemove.has(f.id)));
+          setSelectedFileIds(prev => prev.filter(id => !idsToRemove.has(id)));
+          setSupportFileIds(prev => prev.filter(id => !idsToRemove.has(id)));
+          
+          if (user) {
+            try {
+              const batch = writeBatch(db);
+              selectedBulkIds.forEach(id => {
+                batch.delete(doc(db, `users/${user.uid}/files`, id));
+              });
+              await batch.commit();
+            } catch (e) {
+              console.error("Chyba při hromadném mazání souborů z cloudu:", e);
+            }
           }
-        }
 
-        setSelectedBulkIds([]);
-      }
+          setSelectedBulkIds([]);
+        }
+      });
       return;
     } 
     
@@ -2401,10 +2425,14 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
   };
 
   const clearQueue = () => {
-    if (confirm('Opravdu chcete vymazat celou frontu úloh?')) {
-      setAuditQueue([]);
-      setActiveQueueId(null);
-    }
+    setConfirmDialog({
+      title: 'VYMAZÁNÍ FRONTY ÚLOH',
+      message: 'Opravdu chcete vymazat celou frontu úloh z registru (včetně hotových)?',
+      onConfirm: () => {
+        setAuditQueue([]);
+        setActiveQueueId(null);
+      }
+    });
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -2433,9 +2461,13 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
           try {
             const content = JSON.parse(e.target?.result as string);
             if (content.atoms) {
-              if (confirm('Nalezeny datové atomy. Chcete je integrovat do aktuálního návrhu?')) {
-                setInputText(prev => prev + '\n\n// INTEGROVANÉ ATOMY:\n' + JSON.stringify(content.atoms, null, 2));
-              }
+              setConfirmDialog({
+                title: 'NALEZENY DATOVÉ ATOMY',
+                message: 'Chcete detekované datové atomy integrovat do aktuálního návrhu strukturních doložek?',
+                onConfirm: () => {
+                  setInputText(prev => prev + '\n\n// INTEGROVANÉ ATOMY:\n' + JSON.stringify(content.atoms, null, 2));
+                }
+              });
             }
           } catch (err) { console.error('JSON parse error', err); }
         };
@@ -2717,71 +2749,73 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
       return;
     }
 
-    if (!confirm(`Služba nyní vezme váš aktuální draft a doporučení z auditu, sloučí je a vyvine automaticky novou vylepšenou verzi s označením '${nextVer}'. Chcete pokračovat?`)) {
-      return;
-    }
+    setConfirmDialog({
+      title: 'VÝVOJ NOVÉ VERZE DRAFTU',
+      message: `Služba nyní vezme váš aktuální draft a doporučení z auditu, sloučí je a vyvine automaticky novou vylepšenou verzi s označením '${nextVer}'. Chcete pokračovat?`,
+      onConfirm: async () => {
+        setIsGeneratingUpgrade(true);
 
-    setIsGeneratingUpgrade(true);
+        try {
+          const activeFilesToRewrite = uploadedFiles.filter(f => f.caseId === currentCaseId && f.version === activeVer && f.category === 'MAIN');
+          if (activeFilesToRewrite.length === 0) {
+            alert(`Nenašel jsem žádný hlavní soubor z verze ${activeVer} k vylepšení a revizi.`);
+            setIsGeneratingUpgrade(false);
+            return;
+          }
 
-    try {
-      const activeFilesToRewrite = uploadedFiles.filter(f => f.caseId === currentCaseId && f.version === activeVer && f.category === 'MAIN');
-      if (activeFilesToRewrite.length === 0) {
-        alert(`Nenašel jsem žádný hlavní soubor z verze ${activeVer} k vylepšení a revizi.`);
-        setIsGeneratingUpgrade(false);
-        return;
+          const targetFile = activeFilesToRewrite[0];
+
+          const promptInstructions = `Na základě výsledků předchozího Juris-Auditu:
+          ${activeResultMD}
+
+          Tady jsou extra doporučení pro přepracování:
+          ${fixAnalysisText || ''}
+
+          Úkol: Přepiš a vylepši dodaný hlavní text dokumentu tak, aby stoprocentně vyhovoval všem auditním pilířům, eliminoval veškere nalezené procesní a právní slabiny, a implementoval doporučení ze seznamu výše. 
+          Výsledný text musí být kompletní, plně vyargumentovaný a připravený k podání.
+          Vytvoř novou, vylepšenou verzi, která překonává dosavadní nedostatky.`;
+
+          const resultText = await reviewCourtRequest(
+            targetFile.content || '',
+            [],
+            selectedPillarIds,
+            [],
+            promptInstructions,
+            'COMPOSE'
+          );
+
+          const newFileId = `U-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+          const newFileName = targetFile.name.replace(activeVer, nextVer).includes(nextVer) 
+            ? targetFile.name 
+            : `UPGRADE_${nextVer}_${targetFile.name}`;
+
+          const upgradedFileEntry: FileEntry = {
+            id: newFileId,
+            name: newFileName,
+            type: targetFile.type,
+            isUploaded: true,
+            timestamp: Date.now(),
+            batchId: targetFile.batchId || `UP-${nextVer.toUpperCase()}`,
+            category: 'MAIN',
+            version: nextVer,
+            caseId: currentCaseId,
+            content: resultText,
+            indexStatus: 'IDLE'
+          };
+
+          setUploadedFiles(prev => [...prev, upgradedFileEntry]);
+          setCurrentVersion(nextVer);
+          setVersionFilter(nextVer);
+          
+          alert(`Gratulujeme! Nová verze '${nextVer}' byla úspěšně vygenerována ze zdrojů, zařazena do registru a byla spuštěna její automatická pre-indexace v pozadí.`);
+        } catch (e) {
+          console.error(e);
+          alert("Chyba při upgradování návrhu na novou verzi.");
+        } finally {
+          setIsGeneratingUpgrade(false);
+        }
       }
-
-      const targetFile = activeFilesToRewrite[0];
-
-      const promptInstructions = `Na základě výsledků předchozího Juris-Auditu:
-      ${activeResultMD}
-
-      Tady jsou extra doporučení pro přepracování:
-      ${fixAnalysisText || ''}
-
-      Úkol: Přepiš a vylepši dodaný hlavní text dokumentu tak, aby stoprocentně vyhovoval všem auditním pilířům, eliminoval veškere nalezené procesní a právní slabiny, a implementoval doporučení ze seznamu výše. 
-      Výsledný text musí být kompletní, plně vyargumentovaný a připravený k podání.
-      Vytvoř novou, vylepšenou verzi, která překonává dosavadní nedostatky.`;
-
-      const resultText = await reviewCourtRequest(
-        targetFile.content || '',
-        [],
-        selectedPillarIds,
-        [],
-        promptInstructions,
-        'COMPOSE'
-      );
-
-      const newFileId = `U-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
-      const newFileName = targetFile.name.replace(activeVer, nextVer).includes(nextVer) 
-        ? targetFile.name 
-        : `UPGRADE_${nextVer}_${targetFile.name}`;
-
-      const upgradedFileEntry: FileEntry = {
-        id: newFileId,
-        name: newFileName,
-        type: targetFile.type,
-        isUploaded: true,
-        timestamp: Date.now(),
-        batchId: targetFile.batchId || `UP-${nextVer.toUpperCase()}`,
-        category: 'MAIN',
-        version: nextVer,
-        caseId: currentCaseId,
-        content: resultText,
-        indexStatus: 'IDLE'
-      };
-
-      setUploadedFiles(prev => [...prev, upgradedFileEntry]);
-      setCurrentVersion(nextVer);
-      setVersionFilter(nextVer);
-      
-      alert(`Gratulujeme! Nová verze '${nextVer}' byla úspěšně vygenerována ze zdrojů, zařazena do registru a byla spuštěna její automatická pre-indexace v pozadí.`);
-    } catch (e) {
-      console.error(e);
-      alert("Chyba při upgradování návrhu na novou verzi.");
-    } finally {
-      setIsGeneratingUpgrade(false);
-    }
+    });
   };
 
   const getRechartsData = () => {
@@ -3255,10 +3289,14 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
               <div className="flex gap-1.5">
                 <button 
                   onClick={() => {
-                    if (confirm("Chcete opravdu restartovat stav u všech souborů aktivního spisu? Znovu se spustí proces indexování.")) {
-                      setUploadedFiles(prev => prev.map(f => f.caseId === currentCaseId ? { ...f, indexStatus: 'IDLE' } : f));
-                      setIsAutoIndexingEnabled(true);
-                    }
+                    setConfirmDialog({
+                      title: 'RESTARTOVAT INDEXY',
+                      message: 'Chcete opravdu restartovat stav u všech souborů aktivního spisu? Znovu se spustí proces indexování.',
+                      onConfirm: () => {
+                        setUploadedFiles(prev => prev.map(f => f.caseId === currentCaseId ? { ...f, indexStatus: 'IDLE' } : f));
+                        setIsAutoIndexingEnabled(true);
+                      }
+                    });
                   }}
                   className="px-2 py-1.5 border border-[#222] text-[#555] hover:text-white hover:border-[#444] font-mono text-[8px] uppercase transition-all"
                   title="Obnovit stav u všech souborů na čekající"
@@ -5001,6 +5039,54 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
               </div>
             </motion.div>
           </div>
+        )}
+      </AnimatePresence>
+
+      {/* INTEGROVANÝ POTVRZOVACÍ DIALOG (BYPASS PRO IFRAME BLOKACE) */}
+      <AnimatePresence>
+        {confirmDialog && (
+          <motion.div 
+            initial={{ opacity: 0 }} 
+            animate={{ opacity: 1 }} 
+            exit={{ opacity: 0 }} 
+            className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/85 backdrop-blur-sm p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }} 
+              animate={{ scale: 1, opacity: 1 }} 
+              exit={{ scale: 0.95, opacity: 0 }} 
+              className="w-full max-w-md bg-[#0d0d0d] border border-amber-500/30 p-6 space-y-6 rounded-sm shadow-2xl shadow-amber-500/5"
+            >
+              <div>
+                <h4 className="text-[10px] font-black uppercase tracking-[0.25em] text-[#C5A059] flex items-center gap-2">
+                  ⚠️ SYSTÉMOVÉ POTVRZENÍ
+                </h4>
+                <p className="text-[11px] font-mono text-white/95 uppercase mt-4 font-bold leading-relaxed">
+                  {confirmDialog.title}
+                </p>
+                <p className="text-[9px] font-mono text-[#777] uppercase mt-2 leading-relaxed">
+                  {confirmDialog.message}
+                </p>
+              </div>
+              <div className="flex justify-end gap-3 text-[9px] font-black uppercase font-mono tracking-wider pt-4 border-t border-[#1a1a1a]">
+                <button 
+                  onClick={() => setConfirmDialog(null)}
+                  className="px-4 py-2 border border-[#222] text-[#888] hover:text-white transition-all cursor-pointer bg-transparent"
+                >
+                  Storno
+                </button>
+                <button 
+                  onClick={() => {
+                    confirmDialog.onConfirm();
+                    setConfirmDialog(null);
+                  }}
+                  className="px-4 py-2 border border-amber-500/50 bg-amber-500/10 text-[#C5A059] hover:bg-[#C5A059] hover:text-black transition-all cursor-pointer"
+                >
+                  Potvrdit akci
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
     </div>
