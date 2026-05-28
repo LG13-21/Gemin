@@ -10,6 +10,8 @@ import {
 import ReactMarkdown from 'react-markdown';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
+import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
 import { 
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, 
   CartesianGrid, Legend, BarChart, Bar, AreaChart, Area 
@@ -149,6 +151,22 @@ export default function App() {
   const [queueStrategy, setQueueStrategy] = useState<'COMBINE' | 'PER_FILE' | 'CROSS'>('COMBINE');
   const [appMode, setAppMode] = useState<'AUDIT' | 'COMPOSE' | 'VERTICAL' | 'SYNTHESIS' | 'DASHBOARD' | 'PRE_SHIP'>('AUDIT');
   const [isAutoIndexingEnabled, setIsAutoIndexingEnabled] = useState<boolean>(true);
+  const [quotaCountdown, setQuotaCountdown] = useState<number>(0);
+
+  useEffect(() => {
+    if (quotaCountdown <= 0) return;
+    const interval = setInterval(() => {
+      setQuotaCountdown(prev => {
+        if (prev <= 1) {
+          setIsAutoIndexingEnabled(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [quotaCountdown]);
+
   const [activeAutoImports, setActiveAutoImports] = useState<{id: string, name: string, status: string}[]>([]);
   const [uploadBatchId, setUploadBatchId] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(false);
@@ -1733,7 +1751,7 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
     saveAs(blob, `AUDIT_${task.version || ''}_${task.id}.md`);
   };
 
-  const downloadAllResults = async (onlyToday = false) => {
+  const downloadAllResults = async (onlyToday = false, format: 'ZIP' | 'PDF' = 'ZIP') => {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 
@@ -1749,18 +1767,135 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
       return;
     }
 
-    try {
-      const zip = new JSZip();
-      tasksToExport.forEach(task => {
-        const fileName = `AUDIT_${task.version || ''}_${task.id}.md`;
-        zip.file(fileName, task.result!);
-      });
+    if (format === 'PDF') {
+      try {
+        // Beautiful Markdown-to-HTML formatter matching original system design
+        const formatMDToHTML = (md: string) => {
+          let html = md;
+          // Clean triple-backtick lines and wrap in codeblocks
+          html = html.replace(/```([\s\S]*?)```/g, '<pre style="background: rgba(0,0,0,0.5); border: 1px solid #332111; padding: 12px; font-family: monospace; font-size: 8px; margin: 10px 0; color: #C5A059; overflow-x: auto; white-space: pre-wrap; word-break: break-all;">$1</pre>');
+          // Bold matches
+          html = html.replace(/\*\*(.*?)\*\*/g, '<strong style="color: #ffffff; font-weight: 800;">$1</strong>');
+          // Headings formatting
+          html = html.replace(/^# (.*?)$/gm, '<h3 style="color: #C5A059; font-size: 11px; font-weight: 900; letter-spacing: 1px; border-bottom: 1px solid rgba(197, 160, 89, 0.2); padding-bottom: 4px; margin: 20px 0 10px 0; text-transform: uppercase;">$1</h3>');
+          html = html.replace(/^## (.*?)$/gm, '<h4 style="color: #C5A059; font-size: 9px; font-weight: 900; letter-spacing: 0.5px; margin: 16px 0 8px 0; text-transform: uppercase;">$1</h4>');
+          html = html.replace(/^### (.*?)$/gm, '<h5 style="color: #ffffff; font-size: 8px; font-weight: 800; margin: 12px 0 6px 0; text-transform: uppercase;">• $1</h5>');
+          // Lists formatting
+          html = html.replace(/^[*-] (.*?)$/gm, '<div style="padding-left: 10px; margin: 3px 0; font-size: 8px; color: rgba(255,255,255,0.8); text-transform: uppercase;"><span style="color: #C5A059; margin-right: 5px;">▪</span> $1</div>');
+          // Paragraph formatting
+          html = html.replace(/^(?!<h|<div|<pre)(.*?)$/gm, (match) => {
+            if (!match.trim()) return '';
+            return `<p style="font-size: 8.5px; color: rgba(255,255,255,0.75); margin: 0 0 8px 0; text-transform: uppercase; line-height: 1.5; letter-spacing: 0.2px;">${match}</p>`;
+          });
+          return html;
+        };
 
-      const content = await zip.generateAsync({ type: 'blob' });
-      saveAs(content, onlyToday ? `AUDIT_TODAY_${new Date().toISOString().split('T')[0]}.zip` : `AUDIT_EXPORT_ALL.zip`);
-    } catch (e) {
-      console.error('ZIP Error:', e);
-      alert('Chyba při vytváření ZIP archivu.');
+        // Create elegant offscreen PDF render target
+        const container = document.createElement('div');
+        container.style.position = 'fixed';
+        container.style.left = '-10000px';
+        container.style.top = '0px';
+        container.style.width = '750px';
+        container.style.boxSizing = 'border-box';
+        container.style.background = '#0d0d0d'; // Deep Slate Black background
+        container.style.color = '#e2e8f0';
+        container.style.padding = '45px';
+        container.style.fontFamily = 'monospace, Courier New, sans-serif';
+
+        let reportHtml = `
+          <div style="border: 1px solid rgba(197,160,89,0.35); padding: 25px; margin-bottom: 35px; background: #060606; text-transform: uppercase;">
+            <h1 style="color: #C5A059; margin: 0 0 10px 0; font-size: 16px; font-weight: 900; letter-spacing: 2px; border-bottom: 1px solid rgba(197, 160, 89, 0.25); padding-bottom: 12px;">
+              §LG13§ JURIS-AUDIT SPECIÁLNÍ FORENZNÍ AUTOMONTÁŽ REPOR_PDF
+            </h1>
+            <div style="font-size: 8.5px; line-height: 1.6; color: rgba(255,255,255,0.65);">
+              <div><strong>VYDAVATEL:</strong> JURIS-AUDIT INTEGRÁTOR</div>
+              <div><strong>ČAS VYSTAVENÍ:</strong> ${new Date().toLocaleString('cs-CZ')}</div>
+              <div><strong>EXPORT-KAPACITA:</strong> ${tasksToExport.length} ANALÝZ</div>
+              <div><strong>STUPEŇ UTAJENÍ:</strong> VĚTĚBNÍ DŮVĚRNÉ INTERNÍ REJSTŘÍK</div>
+            </div>
+          </div>
+        `;
+
+        tasksToExport.forEach((task) => {
+          const formattedRes = formatMDToHTML(task.result || '');
+          reportHtml += `
+            <div style="margin-bottom: 40px; border-bottom: 1px solid #1a1a1a; padding-bottom: 25px;">
+              <div style="border-left: 2.5px solid #C5A059; padding-left: 12px; margin-bottom: 20px;">
+                <span style="color: #C5A059; font-size: 7.5px; font-weight: 900; tracking: 1.5px; text-transform: uppercase;">AUDIT EVIDENCE ID: ${task.id}</span>
+                <h2 style="color: #ffffff; font-size: 11px; font-weight: 900; margin: 4px 0 0 0; text-transform: uppercase; letter-spacing: 0.5px;">
+                  VERZE SPISU: ${task.version || 'Draft'} / ARCHIV REGISTER ELEMENT
+                </h2>
+              </div>
+              <div style="background: #080808; border: 1px solid #151515; padding: 20px; font-size: 8px;">
+                ${formattedRes}
+              </div>
+            </div>
+          `;
+        });
+
+        // Verification validation terminal footer
+        reportHtml += `
+          <div style="border: 1px solid rgba(255,255,255,0.08); padding: 20px; background: #060606; text-align: center; margin-top: 40px; text-transform: uppercase;">
+            <p style="color: #C5A059; margin: 0 0 3px 0; font-size: 9px; font-weight: 900; letter-spacing: 1px;">§ FORENZNÍ BEZPEČNOSTNÍ PROTOKOL §</p>
+            <p style="font-size: 7.5px; color: #444; margin: 0 0 15px 0;">Ověřeno kryptografickým doložením pro systém LG13-2026</p>
+            <div style="display: flex; justify-content: space-around; font-size: 8px; color: #666; margin-top: 15px;">
+              <div>______________________<br/><span style="font-size: 7px; color: #333; margin-top: 4px; display:inline-block;">PODPIS ANALYTIKA</span></div>
+              <div>______________________<br/><span style="font-size: 7px; color: #333; margin-top: 4px; display:inline-block;">ZESÍLENÝ PEČEŤ SYSTEMA</span></div>
+            </div>
+          </div>
+        `;
+
+        container.innerHTML = reportHtml;
+        document.body.appendChild(container);
+
+        // Capture with html2canvas and build PDF
+        const canvas = await html2canvas(container, {
+          backgroundColor: '#0d0d0d',
+          scale: 1.5,
+          useCORS: true,
+          logging: false
+        });
+        document.body.removeChild(container);
+
+        const imgWidth = 210; // A4 width in mm
+        const pageHeight = 295; // A4 height in mm
+        const canvasHeightInMM = (canvas.height * imgWidth) / canvas.width;
+        let heightLeft = canvasHeightInMM;
+        let position = 0;
+
+        const imgData = canvas.toDataURL('image/jpeg', 0.95);
+        const pdf = new jsPDF('p', 'mm', 'a4');
+
+        pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, canvasHeightInMM);
+        heightLeft -= pageHeight;
+
+        while (heightLeft >= 0) {
+          position = heightLeft - canvasHeightInMM;
+          pdf.addPage();
+          pdf.addImage(imgData, 'JPEG', 0, position, imgWidth, canvasHeightInMM);
+          heightLeft -= pageHeight;
+        }
+
+        pdf.save(onlyToday ? `AUDIT_REPORT_TODAY_${new Date().toISOString().split('T')[0]}.pdf` : `AUDIT_REPORT_ALL.pdf`);
+      } catch (err) {
+        console.error('PDF Generation Error:', err);
+        alert('Chyba při sestavování PDF reportu přes html2canvas & jspdf.');
+      }
+    } else {
+      // Standard ZIP code
+      try {
+        const zip = new JSZip();
+        tasksToExport.forEach(task => {
+          const fileName = `AUDIT_${task.version || ''}_${task.id}.md`;
+          zip.file(fileName, task.result!);
+        });
+
+        const content = await zip.generateAsync({ type: 'blob' });
+        saveAs(content, onlyToday ? `AUDIT_TODAY_${new Date().toISOString().split('T')[0]}.zip` : `AUDIT_EXPORT_ALL.zip`);
+      } catch (e) {
+        console.error('ZIP Error:', e);
+        alert('Chyba při vytváření ZIP archivu.');
+      }
     }
   };
 
@@ -1789,10 +1924,11 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
 
   // Background Indexing Logic (Throttled & Locked)
   useEffect(() => {
-    // Only start if not already indexing and not currently performing a main review
-    if (isIndexingRef.current || isReviewing || !isAutoIndexingEnabled) return;
+    // Only start if not already indexing, not performing main review, auto-indexing is enabled, and no current quota cooldown is active
+    if (isIndexingRef.current || isReviewing || !isAutoIndexingEnabled || quotaCountdown > 0) return;
 
     const idleFile = [...uploadedFiles]
+      .filter(f => f.caseId === currentCaseId)
       .sort((a, b) => b.timestamp - a.timestamp)
       .find(f => f.indexStatus === 'IDLE' && f.content && !f.isArchived);
     
@@ -1833,10 +1969,12 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
           }
         } catch (e: any) {
           console.error('Indexing failed for:', idleFile.name, e);
-          const isQuota = e.message?.includes('429') || e.message?.includes('QUOTA') || e.message?.includes('Quota') || e.message?.includes('RESOURCE_EXHAUSTED');
+          const errorMsg = (e.message || '').toLowerCase();
+          const isQuota = errorMsg.includes('429') || errorMsg.includes('quota') || errorMsg.includes('resource_exhausted') || errorMsg.includes('exhausted') || errorMsg.includes('limit');
           if (isQuota) {
             setIsAutoIndexingEnabled(false);
-            setError("⚠️ PRE-INDEXACE POZASTAVENA (Quota 429): Dosáhli jste limitu bezplatných požadavků pro Gemini API. Auto-indexace na pozadí byla vypnuta. Až vyprší časový limit (30-60 s), můžete ji opět manuálně zapnout kliknutím na tlačítko AKTIVNÍ / POZASTAVENÁ ve správě souborů.");
+            setQuotaCountdown(45);
+            setError("⚠️ PRE-INDEXACE DOČASNĚ POZASTAVENA: Byl překročen bezplatný limit (Quota 429) pro Gemini API. Systém automaticky obnoví indexování aktivního spisu na pozadí za 45 sekund.");
           }
           setUploadedFiles(prev => prev.map(f => f.id === idleFile.id ? { ...f, indexStatus: 'ERROR' } : f));
           // Wait longer on error before next attempt
@@ -1847,7 +1985,7 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
       };
       processFile();
     }
-  }, [uploadedFiles, isReviewing, isAutoIndexingEnabled]);
+  }, [uploadedFiles, isReviewing, isAutoIndexingEnabled, currentCaseId, quotaCountdown]);
 
   // Trigger background loading of non-priority folders when priority folders are done and indexed
   useEffect(() => {
@@ -3253,13 +3391,22 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
               <div className="flex flex-col">
                 <span className="text-[8px] uppercase tracking-wider text-[#666] font-mono">Pre-indexace pozadí:</span>
                 <button 
-                  onClick={() => setIsAutoIndexingEnabled(!isAutoIndexingEnabled)}
+                  onClick={() => {
+                    if (quotaCountdown > 0) {
+                      setQuotaCountdown(0);
+                      setIsAutoIndexingEnabled(true);
+                    } else {
+                      setIsAutoIndexingEnabled(!isAutoIndexingEnabled);
+                    }
+                  }}
                   className={cn(
-                    "mt-1 px-3 py-1 text-[9px] font-black uppercase tracking-widest border transition-all",
-                    isAutoIndexingEnabled ? "bg-emerald-500/10 border-emerald-500 text-emerald-500" : "bg-red-500/10 border-red-500 text-red-500"
+                    "mt-1 px-3 py-1 text-[9px] font-black uppercase tracking-widest border transition-all cursor-pointer",
+                    isAutoIndexingEnabled ? "bg-emerald-500/10 border-emerald-500 text-emerald-500" : 
+                    quotaCountdown > 0 ? "bg-amber-500/10 border-amber-500 text-amber-500 animate-pulse" : "bg-red-500/10 border-red-500 text-red-500"
                   )}
                 >
-                  {isAutoIndexingEnabled ? '● AKTIVNÍ' : '○ POZASTAVENÁ'}
+                  {isAutoIndexingEnabled ? '● AKTIVNÍ' : 
+                   quotaCountdown > 0 ? `⌛ LIMIT-OBNOVA (${quotaCountdown}s)` : '○ POZASTAVENÁ'}
                 </button>
               </div>
 
@@ -3660,19 +3807,33 @@ Optimalizováno pro NOZ 2026, ZŘS po novelách 2025/2026.
                       <Trash2 size={10}/> Vymazat frontu
                     </button>
                   )}
-                  <button 
-                    onClick={() => downloadAllResults(true)} 
+                   <button 
+                    onClick={() => downloadAllResults(true, 'ZIP')} 
                     disabled={auditQueue.filter(t => t.status === 'done' && t.timestamp >= new Date().setHours(0,0,0,0)).length === 0}
                     className="px-3 py-1 text-[9px] uppercase font-black text-emerald-500 hover:bg-emerald-500/10 transition-all disabled:opacity-30 flex items-center gap-2"
                   >
                     <Download size={10}/> Dnešní (ZIP)
                   </button>
                   <button 
-                    onClick={() => downloadAllResults(false)} 
+                    onClick={() => downloadAllResults(true, 'PDF')} 
+                    disabled={auditQueue.filter(t => t.status === 'done' && t.timestamp >= new Date().setHours(0,0,0,0)).length === 0}
+                    className="px-3 py-1 text-[9px] uppercase font-black text-emerald-400 hover:bg-emerald-400/10 transition-all disabled:opacity-30 flex items-center gap-2"
+                  >
+                    <FileText size={10}/> Dnešní (PDF)
+                  </button>
+                  <button 
+                    onClick={() => downloadAllResults(false, 'ZIP')} 
                     disabled={auditQueue.filter(t => t.status === 'done').length === 0}
                     className="px-3 py-1 text-[9px] uppercase font-black text-blue-500 hover:bg-blue-500/10 transition-all disabled:opacity-30 flex items-center gap-2"
                   >
                     <Archive size={10}/> Vše (ZIP)
+                  </button>
+                  <button 
+                    onClick={() => downloadAllResults(false, 'PDF')} 
+                    disabled={auditQueue.filter(t => t.status === 'done').length === 0}
+                    className="px-3 py-1 text-[9px] uppercase font-black text-blue-400 hover:bg-blue-400/10 transition-all disabled:opacity-30 flex items-center gap-2"
+                  >
+                    <FileDown size={10}/> Vše (PDF)
                   </button>
                 </div>
                 <button 

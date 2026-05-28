@@ -16,7 +16,7 @@ export interface GoogleTask {
   due?: string;
 }
 
-const BASE_URL = 'https://tasks.googleapis.com/v1';
+const BASE_URL = 'https://www.googleapis.com/tasks/v1';
 
 async function fetchWithAuth(url: string, token: string, options: RequestInit = {}) {
   const headers = {
