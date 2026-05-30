@@ -77,8 +77,8 @@ export const PreShipControlView: React.FC<PreShipControlViewProps> = ({
   // Initialize selected analyses from current done queue
   const doneAnalyses = auditQueue.filter(t => t.status === 'done');
 
-  // Simulation Mode states - defaults to true if there are no done analyses in the queue
-  const [useSimulationMode, setUseSimulationMode] = useState<boolean>(doneAnalyses.length === 0);
+  // Simulation Mode states - defaults to false as per user preference (explicit activation only)
+  const [useSimulationMode, setUseSimulationMode] = useState<boolean>(false);
 
   const simulatedAnalyses = [
     {
@@ -441,8 +441,7 @@ export const PreShipControlView: React.FC<PreShipControlViewProps> = ({
       console.error(err);
       const isQuota = err?.message?.includes('429') || err?.message?.includes('quota') || err?.message?.includes('limit') || err?.message?.includes('exceeded');
       if (isQuota) {
-        setError(`⚠️ DETEKOVÁN LIMIT QUOTY GEMINI API (429). Automaticky přepínám do simulačního pro-ship režimu (Mock pipeline). Klepnutím na tlačítko níže vytvoříte konsolidovaný report.`);
-        setUseSimulationMode(true);
+        setError(`⚠️ DETEKOVÁN LIMIT QUOTY GEMINI API (429) NEBO CHYBA PROJEKTU. Pokud si přejete pokračovat fiktivně, zapněte prosím nahoře Simulační bypass.`);
       } else {
         setError(err?.message || 'Nepodařilo se vygenerovat konsolidovaný report.');
       }
@@ -744,8 +743,7 @@ export const PreShipControlView: React.FC<PreShipControlViewProps> = ({
       console.error(err);
       const isQuota = err?.message?.includes('429') || err?.message?.includes('quota') || err?.message?.includes('limit') || err?.message?.includes('exceeded');
       if (isQuota) {
-        setError(`⚠️ DETEKOVÁN LIMIT QUOTY GEMINI API (429). Automaticky přepínám do simulačního pro-ship režimu (Mock pipeline). Klepnutím na tlačítko níže spustíte simulované testy.`);
-        setUseSimulationMode(true);
+        setError(`⚠️ DETEKOVÁN LIMIT QUOTY GEMINI API (429) NEBO CHYBA PROJEKTU. Pokud chcete pokračovat v simulovaném režimu, zapněte prosím nahoře Simulační bypass.`);
       } else {
         setError(err?.message || 'Chyba při vygenerování pre-ship release testů.');
       }
@@ -1077,10 +1075,7 @@ export const PreShipControlView: React.FC<PreShipControlViewProps> = ({
       console.error(err);
       const isQuota = err?.message?.includes('429') || err?.message?.includes('quota') || err?.message?.includes('limit') || err?.message?.includes('exceeded');
       if (isQuota) {
-        setError(`⚠️ DETEKOVÁN LIMIT QUOTY GEMINI API (429). Přepínám do simulačního režimu pro interaktivní kapitálový audit.`);
-        setUseSimulationMode(true);
-        // Automatically rerun in simulation mode
-        setTimeout(() => analyzeSingleChapter(index, title, text), 50);
+        setError(`⚠️ DETEKOVÁN LIMIT QUOTY GEMINI API (429). Aktivujte prosím níže Simulační bypass, pokud chcete otestovat audit kapitol bez reálného klíče.`);
       } else {
         setError(`Chyba při analýze kapitoly: ${err?.message}`);
       }

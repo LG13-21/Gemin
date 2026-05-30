@@ -204,10 +204,18 @@ export default function App() {
   const [isSavingAnalysisToDrive, setIsSavingAnalysisToDrive] = useState(false);
 
   // High-priority and background imports for Google Drive
-  const [driveFoldersToImportPrompt, setDriveFoldersToImportPrompt] = useState<{ id: string; name: string; selected: boolean }[] | null>(null);
+  const [driveFoldersToImportPrompt, setDriveFoldersToImportPrompt] = useState<{ id: string; name: string; importType: 'PRIORITY' | 'BACKGROUND' | 'IGNORE' }[] | null>(null);
   const [backgroundImportQueue, setBackgroundImportQueue] = useState<{ id: string; name: string }[]>([]);
   const [priorityImportIds, setPriorityImportIds] = useState<Set<string>>(new Set());
   const [backgroundImportStarted, setBackgroundImportStarted] = useState<boolean>(false);
+  const [ignoredFolderNames, setIgnoredFolderNames] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('juris_ignored_folders');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
   // Google Tasks Integration States
   const [googleTasksListId, setGoogleTasksListId] = useState<string | null>(null);
@@ -485,10 +493,11 @@ Tento úkol sleduje auditní proceduru JurisReview.`;
       setBackgroundImportStarted(false);
 
       // Open a beautiful prompt where user can select priority folders and leave other ones for the background
+      const ignoredSet = new Set(ignoredFolderNames);
       setDriveFoldersToImportPrompt(toImport.map((folder: any) => ({
         id: folder.id,
         name: folder.name,
-        selected: true
+        importType: ignoredSet.has(folder.name) ? 'IGNORE' : 'PRIORITY'
       })));
 
     } catch (err) {
@@ -2579,8 +2588,7 @@ Provedli jsme křížovou simulovanou kontrolu doloženého textu proti zaručen
       console.error(err);
       const isQuotaOrAuth = err?.message?.includes('429') || err?.message?.includes('quota') || err?.message?.includes('limit') || err?.message?.includes('exceeded') || err?.message?.includes('API key') || err?.message?.includes('key') || err?.message?.includes('auth');
       if (isQuotaOrAuth) {
-        setUseSimulationMode(true);
-        setError("⚠️ DETEKOVÁN LIMIT QUOTY NEBO DEAKTIVOVANÝ BILLING PRO GEMINI API (429). Systém automaticky aktivoval Simulační Bypass. Spusťte prosím úlohu znovu – analýza proběhne okamžitě a bezpečně.");
+        setError("⚠️ DETEKOVÁN LIMIT QUOTY (429), DEAKTIVOVANÝ CLOUD BILLING NEBO CHYBNÝ KLÍČ PRO GEMINI API. Pokud chcete pokračovat v testování bez reálných nákladů, můžete níže ručně povolit Simulační bypass.");
       } else {
         setError(err.message || 'Error occurred');
       }
@@ -3511,6 +3519,52 @@ Provedli jsme křížovou simulovanou kontrolu doloženého textu proti zaručen
               </div>
             </div>
           </div>
+
+          {/* IGNOROVANÉ SLOŽKY Z GOOGLE DISKU */}
+          {ignoredFolderNames.length > 0 && (
+            <div className="bg-[#0a0a0a] border border-[#222]/60 p-4 mb-6 rounded-xs animate-in slide-in-from-top-2 duration-300">
+              <div className="flex items-center justify-between border-b border-[#181818] pb-2 mb-3">
+                <span className="text-[9px] font-black uppercase text-red-400 tracking-widest flex items-center gap-1.5 font-mono">
+                  🚫 IGNOROVANÉ SLOŽKY Z DISKU GOOGLE ({ignoredFolderNames.length})
+                </span>
+                <button
+                  onClick={() => {
+                    setConfirmDialog({
+                      title: 'ZRUŠIT IGNOROVÁNÍ VŠECH SLOŽEK',
+                      message: 'Chcete vymazat celý seznam ignorovaných složek? Při příštím skenu budou tyto složky opět staženy/zpracovány.',
+                      onConfirm: () => {
+                        setIgnoredFolderNames([]);
+                        localStorage.removeItem('juris_ignored_folders');
+                      }
+                    });
+                  }}
+                  className="text-[8px] font-mono uppercase font-black text-rose-500 hover:text-rose-400 transition-colors cursor-pointer bg-transparent border-0 outline-none"
+                >
+                  Odebrat všechny
+                </button>
+              </div>
+              <p className="text-[8.5px] text-[#666] mb-3 uppercase font-mono">
+                Složky vyznačené jako ignorované se zcela přeskočí při automatickém stahování. Klepnutím na název složku z ignorování vyřadíte:
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {ignoredFolderNames.map(name => (
+                  <button
+                    key={name}
+                    onClick={() => {
+                      const updated = ignoredFolderNames.filter(n => n !== name);
+                      setIgnoredFolderNames(updated);
+                      localStorage.setItem('juris_ignored_folders', JSON.stringify(updated));
+                    }}
+                    className="px-2 py-1 bg-red-950/20 border border-red-900/35 hover:border-emerald-500/50 hover:bg-emerald-950/15 hover:text-emerald-400 text-red-400 font-mono text-[8px] uppercase tracking-wider rounded-sm transition-all cursor-pointer flex items-center gap-1.5"
+                    title="Kliknutím obnovíte zpracovávání této složky"
+                  >
+                    <span>{name}</span>
+                    <span className="text-[7.5px] text-red-600 font-black hover:text-emerald-400">×</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* STRATEGICKÝ GRAF RIZIK VERZÍ (RECHARTS) */}
           {selectionMode === 'VERSIONS' && (
@@ -5173,53 +5227,93 @@ Provedli jsme křížovou simulovanou kontrolu doloženého textu proti zaručen
                   Chcete nahrát vše najednou, nebo označit ty s nejvyšší prioritou? Zbytek složek se dohraje a zindexuje automaticky na pozadí.
                 </p>
 
-                <div className="flex items-center justify-between bg-[#151515]/20 border border-[#222]/40 px-3 py-2 rounded-sm shrink-0">
-                  <span className="text-[8px] font-black uppercase tracking-wider text-zinc-500">Výběr Priorit:</span>
-                  <div className="flex gap-2">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between bg-[#151515]/20 border border-[#222]/40 p-3 gap-2.5 rounded-sm shrink-0">
+                  <span className="text-[8px] font-black uppercase tracking-wider text-zinc-500 font-mono">Hromadné akce:</span>
+                  <div className="flex flex-wrap gap-1.5 justify-end">
                     <button
                       type="button"
                       onClick={() => {
-                        const updated = driveFoldersToImportPrompt.map(folder => ({ ...folder, selected: true }));
+                        const updated = driveFoldersToImportPrompt.map(folder => ({ ...folder, importType: 'PRIORITY' as const }));
                         setDriveFoldersToImportPrompt(updated);
                       }}
-                      className="text-[9px] font-black uppercase text-[#C5A059] border border-[#C5A059]/20 px-2.5 py-1 hover:bg-[#C5A059]/10 transition-all bg-transparent cursor-pointer"
+                      className="text-[8px] font-black uppercase text-[#C5A059] border border-[#C5A059]/20 px-2 py-1 hover:bg-[#C5A059]/10 transition-all bg-transparent cursor-pointer"
                     >
-                      ✓ Označit vše
+                      ☀️ Vše prioritní
                     </button>
                     <button
                       type="button"
                       onClick={() => {
-                        const updated = driveFoldersToImportPrompt.map(folder => ({ ...folder, selected: false }));
+                        const updated = driveFoldersToImportPrompt.map(folder => ({ ...folder, importType: 'BACKGROUND' as const }));
                         setDriveFoldersToImportPrompt(updated);
                       }}
-                      className="text-[9px] font-black uppercase text-zinc-400 border border-zinc-800 px-2.5 py-1 hover:text-white hover:border-zinc-700 transition-all bg-transparent cursor-pointer"
+                      className="text-[8px] font-black uppercase text-zinc-400 border border-zinc-800 px-2 py-1 hover:text-white hover:border-zinc-700 transition-all bg-transparent cursor-pointer"
                     >
-                      ✗ Smazat výběr (označit 0)
+                      ☁️ Vše na pozadí
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const updated = driveFoldersToImportPrompt.map(folder => ({ ...folder, importType: 'IGNORE' as const }));
+                        setDriveFoldersToImportPrompt(updated);
+                      }}
+                      className="text-[8px] font-black uppercase text-red-500 border border-red-950 px-2 py-1 hover:bg-red-950/20 transition-all bg-transparent cursor-pointer"
+                    >
+                      🚫 Vše ignorovat
                     </button>
                   </div>
                 </div>
 
-                <div className="flex-1 overflow-y-auto border border-[#222] bg-[#0c0c0c] p-4 space-y-2 rounded-sm custom-scrollbar">
+                <div className="flex-1 overflow-y-auto border border-[#222] bg-[#0c0c0c] p-4 space-y-2 rounded-sm custom-scrollbar max-h-[350px]">
                   {driveFoldersToImportPrompt.map((f, idx) => (
-                    <label key={f.id} className="flex items-center gap-3 p-2 hover:bg-[#151515] rounded cursor-pointer transition-colors border border-transparent hover:border-[#222]">
-                      <input 
-                        type="checkbox" 
-                        checked={f.selected} 
-                        onChange={(e) => {
-                          const updated = [...driveFoldersToImportPrompt];
-                          updated[idx].selected = e.target.checked;
-                          setDriveFoldersToImportPrompt(updated);
-                        }}
-                        className="rounded border-[#C5A059] text-[#C5A059] focus:ring-[#C5A059] w-4 h-4 bg-black"
-                      />
+                    <div key={f.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-[#111] hover:bg-[#151515] rounded border border-[#222]/50 hover:border-[#333] transition-all">
                       <div className="flex-1 min-w-0">
                         <p className="text-xs font-black text-white uppercase tracking-wider">{f.name}</p>
-                        <p className="text-[9px] font-mono text-zinc-500">ID: {f.id}</p>
+                        <p className="text-[9px] font-mono text-zinc-600">ID: {f.id}</p>
                       </div>
-                      <span className="text-[9px] font-mono text-[#C5A059] bg-[#C5A059]/10 px-2 py-0.5 rounded uppercase">
-                        {f.selected ? 'Prioritní' : 'Na pozadí'}
-                      </span>
-                    </label>
+                      
+                      {/* 3-State selector */}
+                      <div className="flex p-0.5 bg-black border border-[#222] rounded shrink-0 self-start sm:self-center">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updated = [...driveFoldersToImportPrompt];
+                            updated[idx].importType = 'PRIORITY';
+                            setDriveFoldersToImportPrompt(updated);
+                          }}
+                          className={`px-2.5 py-1 text-[8px] uppercase font-black tracking-wider transition-all rounded-sm cursor-pointer ${
+                            f.importType === 'PRIORITY' ? 'bg-[#C5A059] text-black font-extrabold' : 'text-zinc-500 hover:text-zinc-300'
+                          }`}
+                        >
+                          ☀️ Prio
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updated = [...driveFoldersToImportPrompt];
+                            updated[idx].importType = 'BACKGROUND';
+                            setDriveFoldersToImportPrompt(updated);
+                          }}
+                          className={`px-2.5 py-1 text-[8px] uppercase font-black tracking-wider transition-all rounded-sm cursor-pointer ${
+                            f.importType === 'BACKGROUND' ? 'bg-zinc-800 text-white' : 'text-zinc-500 hover:text-zinc-300'
+                          }`}
+                        >
+                          ☁️ Pozadí
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updated = [...driveFoldersToImportPrompt];
+                            updated[idx].importType = 'IGNORE';
+                            setDriveFoldersToImportPrompt(updated);
+                          }}
+                          className={`px-2.5 py-1 text-[8px] uppercase font-black tracking-wider transition-all rounded-sm cursor-pointer ${
+                            f.importType === 'IGNORE' ? 'bg-red-950/40 text-red-400 border border-red-900/40' : 'text-zinc-500 hover:text-zinc-300'
+                          }`}
+                        >
+                          🚫 Ignorovat
+                        </button>
+                      </div>
+                    </div>
                   ))}
                 </div>
 
@@ -5227,40 +5321,66 @@ Provedli jsme křížovou simulovanou kontrolu doloženého textu proti zaručen
                   <button
                     onClick={() => {
                       if (!driveToken) return;
-                      // Load All
-                      driveFoldersToImportPrompt.forEach(folder => {
+                      // Load All except ignored
+                      const activeFolders = driveFoldersToImportPrompt.filter(f => f.importType !== 'IGNORE');
+                      const ignoredFolders = driveFoldersToImportPrompt.filter(f => f.importType === 'IGNORE');
+
+                      // Persist ignored list
+                      const newIgnored = new Set(ignoredFolderNames);
+                      ignoredFolders.forEach(folder => newIgnored.add(folder.name));
+                      activeFolders.forEach(folder => newIgnored.delete(folder.name));
+                      const finalIgnoredArray = Array.from(newIgnored);
+                      setIgnoredFolderNames(finalIgnoredArray);
+                      localStorage.setItem('juris_ignored_folders', JSON.stringify(finalIgnoredArray));
+
+                      activeFolders.forEach(folder => {
                         autoImportSingleVersionFolder(folder.id, folder.name, driveToken);
                       });
                       setDriveFoldersToImportPrompt(null);
                     }}
                     className="w-full py-3 border border-[#333] hover:border-[#C5A059] font-mono text-[10px] uppercase font-black tracking-wider text-zinc-400 hover:text-white transition-all bg-transparent cursor-pointer"
                   >
-                    Nahrát vše najednou
+                    Nahrát aktivní ({driveFoldersToImportPrompt.filter(f => f.importType !== 'IGNORE').length})
                   </button>
                   <button
                     onClick={() => {
                       if (!driveToken) return;
-                      const selectedFolders = driveFoldersToImportPrompt.filter(f => f.selected);
-                      const unselectedFolders = driveFoldersToImportPrompt.filter(f => !f.selected);
+                      const priorityFolders = driveFoldersToImportPrompt.filter(f => f.importType === 'PRIORITY');
+                      const backgroundFolders = driveFoldersToImportPrompt.filter(f => f.importType === 'BACKGROUND');
+                      const ignoredFolders = driveFoldersToImportPrompt.filter(f => f.importType === 'IGNORE');
 
-                      if (selectedFolders.length === 0) {
-                        alert("Prosím zvolte alespoň jednu složku jako prioritní, nebo zvolte možnost nahrát vše najednou.");
+                      // Persist ignored list
+                      const newIgnored = new Set(ignoredFolderNames);
+                      ignoredFolders.forEach(folder => newIgnored.add(folder.name));
+                      // If folder is set to priority or background, remove from ignored list
+                      priorityFolders.forEach(folder => newIgnored.delete(folder.name));
+                      backgroundFolders.forEach(folder => newIgnored.delete(folder.name));
+                      const finalIgnoredArray = Array.from(newIgnored);
+                      setIgnoredFolderNames(finalIgnoredArray);
+                      localStorage.setItem('juris_ignored_folders', JSON.stringify(finalIgnoredArray));
+
+                      if (priorityFolders.length === 0 && backgroundFolders.length === 0) {
+                        alert("Nemáte vybrané žádné složky ke zpracování (všechny jsou ignorovány).");
                         return;
                       }
 
                       // Set up priority and background tracking
-                      const prioritySet = new Set(selectedFolders.map(f => f.name));
+                      const prioritySet = new Set(priorityFolders.map(f => f.name));
                       setPriorityImportIds(prioritySet);
-                      setBackgroundImportQueue(unselectedFolders.map(f => ({ id: f.id, name: f.name })));
+                      setBackgroundImportQueue(backgroundFolders.map(f => ({ id: f.id, name: f.name })));
                       setBackgroundImportStarted(false);
 
                       // Download priority ones immediately
-                      selectedFolders.forEach((folder) => {
+                      priorityFolders.forEach((folder) => {
                         autoImportSingleVersionFolder(folder.id, folder.name, driveToken);
                       });
 
                       setDriveFoldersToImportPrompt(null);
-                      alert(`Spuštěno prioritní nahrávání pro ${selectedFolders.length} složek. Zbylých ${unselectedFolders.length} složek bude dohráno na pozadí poté, co prioritní dojdou do stavu 'DONE' a budou připraveny k analýze.`);
+                      if (priorityFolders.length > 0) {
+                        alert(`Spuštěno prioritní nahrávání pro ${priorityFolders.length} složek. ${backgroundFolders.length} složek bude dohráno na pozadá, a ${ignoredFolders.length} složek bylo přeskočeno a uloženo jako ignorované.`);
+                      } else {
+                        alert(`Všechny z ${backgroundFolders.length} složek budou dohrány na pozadí. Ignorováno bylo ${ignoredFolders.length} složek.`);
+                      }
                     }}
                     className="w-full py-3 bg-[#C5A059] hover:bg-white text-black font-mono text-[10px] uppercase font-black tracking-wider transition-all cursor-pointer"
                   >
